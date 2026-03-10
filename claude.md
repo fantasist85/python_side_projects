@@ -7,6 +7,7 @@
 | 프로젝트 이름 | 폴더 경로 | 설명 | 주요 기술/라이브러리 | 상태 |
 |--------------|----------|------|-------------------|------|
 | PyCANoe | `/PyCANoe` | CAN/LIN 네트워크 분석 및 시뮬레이션 도구 | PySide6, PyQtGraph, python-can, cantools | 개발중 |
+| CSV-Optimizer | `/CSV-Optimizer` | CSV 파일 편집 및 가공 도구 | Polars, NumPy, Matplotlib | 계획중 |
 
 ## 프로젝트 구조
 
