@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 # Version
 # ──────────────────────────────────────────────────────────────────────────────
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -551,7 +551,159 @@ def _run_scan(args: argparse.Namespace) -> None:
 # Entry point
 # ──────────────────────────────────────────────────────────────────────────────
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Drag-and-drop  (v1.3.0)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _pause_on_windows() -> None:
+    """Keep the console window open after conversion finishes (Windows .exe only).
+
+    When doc2md.exe is launched via drag-and-drop (or a double-click), the
+    console window is created by Windows and destroyed as soon as the process
+    exits.  Pausing lets the user read the output before the window closes.
+    This helper is a no-op on non-Windows platforms and when the process is
+    run from an existing terminal (stdout is not a TTY check is intentionally
+    skipped — drag-and-drop always attaches a TTY on Windows).
+    """
+    import os
+    if os.name == "nt":
+        input("\nPress Enter to close this window…")
+
+
+def _detect_dragdrop(argv: list[str]) -> bool:
+    """Return True when argv looks like a drag-and-drop invocation.
+
+    Heuristic: no recognised sub-command as first positional argument and
+    at least one argument that is a valid filesystem path.
+
+    Recognised sub-commands are intentionally hard-coded so that a future
+    command named after a real filename is not misclassified.
+    """
+    _KNOWN_SUBCOMMANDS = {"excel", "word", "scan"}
+    if not argv:
+        return False
+    first = argv[0].lstrip("-")          # ignore leading flag-like strings
+    return first not in _KNOWN_SUBCOMMANDS and Path(argv[0]).exists()
+
+
+def _run_dragdrop(paths: list[str]) -> None:
+    """Auto-route one or more drag-and-dropped paths to the correct converter.
+
+    Routing rules
+    ─────────────
+      Directory           → scan  (converts all .xlsx + .docx underneath)
+      .xlsx file          → excel (single-file conversion)
+      .docx file          → word  (single-file conversion)
+      Multiple files      → each file is dispatched individually (directories
+                            are dispatched as scan)
+      Unsupported suffix  → warning printed; file is skipped
+
+    Default converter options (identical to calling the sub-command with no
+    extra flags) are used so that drag-and-drop 'just works' without a
+    terminal.  Power users should use the CLI sub-commands for fine-grained
+    control.
+    """
+    import excel2md
+    import word2md
+
+    # ── Defaults mirroring sub-command defaults ───────────────────────────────
+    excel_kwargs: dict = dict(
+        add_frontmatter=True,
+        add_toc=True,
+        max_col_width=None,
+        skip_empty_rows=False,
+        skip_empty_cols=False,
+    )
+    word_kwargs: dict = dict(
+        add_frontmatter=True,
+        add_index=True,
+        force_pipe=False,
+    )
+
+    ok = skipped = 0
+    failed: list[tuple[str, str]] = []
+
+    for raw in paths:
+        p = Path(raw)
+
+        if not p.exists():
+            logger.warning("[skip]  Path not found: %s", raw)
+            skipped += 1
+            continue
+
+        # ── Directory → scan ─────────────────────────────────────────────────
+        if p.is_dir():
+            logger.info("[scan]  %s", p)
+            xlsx_files, docx_files = _collect_scan_targets(p)
+            stats = ScanStats()
+            for f in xlsx_files:
+                _try_convert(f, p, excel2md.convert, excel_kwargs, False, stats)
+            for f in docx_files:
+                _try_convert(f, p, word2md.convert, word_kwargs, False, stats)
+            ok      += stats.ok
+            skipped += stats.skipped
+            failed  += stats.failed
+            continue
+
+        # ── Single file ───────────────────────────────────────────────────────
+        suffix = p.suffix.lower()
+        out    = p.with_suffix(".md")
+
+        if suffix == ".xlsx":
+            logger.info("[excel] %s  →  %s", p.name, out.name)
+            try:
+                excel2md.convert(p, out, **excel_kwargs)
+                ok += 1
+            except Exception as exc:        # noqa: BLE001
+                logger.error("[FAIL]  %s: %s", p.name, exc)
+                failed.append((str(p), str(exc)))
+
+        elif suffix == ".docx":
+            logger.info("[word]  %s  →  %s", p.name, out.name)
+            try:
+                word2md.convert(p, out, **word_kwargs)
+                ok += 1
+            except Exception as exc:        # noqa: BLE001
+                logger.error("[FAIL]  %s: %s", p.name, exc)
+                failed.append((str(p), str(exc)))
+
+        else:
+            logger.warning("[skip]  Unsupported file type (%s): %s", suffix or "(none)", p.name)
+            skipped += 1
+
+    # ── Summary ───────────────────────────────────────────────────────────────
+    logger.info("")
+    logger.info("=" * 56)
+    logger.info("  Done")
+    logger.info("  Converted : %d", ok)
+    if skipped:
+        logger.info("  Skipped   : %d", skipped)
+    if failed:
+        logger.error("  Failed    : %d", len(failed))
+        for src, msg in failed:
+            logger.error("    x %s: %s", src, msg)
+    logger.info("=" * 56)
+
+    _pause_on_windows()
+
+    if failed:
+        sys.exit(1)
+
+
 def main() -> None:
+    # ── Drag-and-drop fast-path ───────────────────────────────────────────────
+    # When the user drags one or more files / folders onto doc2md.exe, Windows
+    # passes the paths directly as positional arguments with no sub-command.
+    # Detect this case early and bypass argparse entirely so the user never
+    # sees a "subcommand required" error message.
+    if _detect_dragdrop(sys.argv[1:]):
+        logging.basicConfig(level=logging.INFO, format="%(message)s")
+        logger.info("doc2md %s — drag-and-drop mode", __version__)
+        logger.info("")
+        _run_dragdrop(sys.argv[1:])
+        return
+    # ─────────────────────────────────────────────────────────────────────────
+
     parser = argparse.ArgumentParser(
         prog="doc2md",
         description=textwrap.dedent("""\
