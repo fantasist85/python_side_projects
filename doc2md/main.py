@@ -26,6 +26,7 @@ Examples
 
 from __future__ import annotations
 
+import difflib
 import logging
 import sys
 import textwrap
@@ -170,14 +171,16 @@ def _run_excel(args: argparse.Namespace) -> None:
 
     if args.batch:
         if not inp.is_dir():
-            sys.exit("--batch requires a directory as input")
+            logger.error("error: --batch requires a directory path, got: %s", inp)
+            sys.exit(1)
         out_dir = Path(args.output_dir) if args.output_dir else None
         if out_dir:
             out_dir.mkdir(parents=True, exist_ok=True)
         excel2md.batch_convert(inp, out_dir, **kwargs)
     else:
         if not inp.exists():
-            sys.exit(f"File not found: {inp}")
+            logger.error("error: file not found: %s", inp)
+            sys.exit(1)
         out = Path(args.output) if args.output else None
         excel2md.convert(inp, out, **kwargs)
 
@@ -298,14 +301,16 @@ def _run_word(args: argparse.Namespace) -> None:
 
     if args.batch:
         if not inp.is_dir():
-            sys.exit("--batch requires a directory as input")
+            logger.error("error: --batch requires a directory path, got: %s", inp)
+            sys.exit(1)
         out_dir = Path(args.output_dir) if args.output_dir else None
         if out_dir:
             out_dir.mkdir(parents=True, exist_ok=True)
         word2md.batch_convert(inp, out_dir, **kwargs)
     else:
         if not inp.exists():
-            sys.exit(f"File not found: {inp}")
+            logger.error("error: file not found: %s", inp)
+            sys.exit(1)
         out = Path(args.output) if args.output else None
         word2md.convert(inp, out, **kwargs)
 
@@ -335,9 +340,11 @@ def _add_scan_parser(subparsers) -> None:
 
             Recommended workflow
             ────────────────────
-              1. doc2md scan ./docs --dry-run          # preview what will be converted
-              2. doc2md scan ./docs                    # run the full conversion
-              3. doc2md scan ./docs --skip-existing    # incremental re-run (new files only)
+              1. doc2md scan --dry-run                 # preview current folder (ROOT omitted)
+              2. doc2md scan                           # convert current folder
+              3. doc2md scan ./docs --dry-run          # preview a specific folder
+              4. doc2md scan ./docs                    # run the full conversion
+              5. doc2md scan ./docs --skip-existing    # incremental re-run (new files only)
 
             Exit code
             ─────────
@@ -347,6 +354,8 @@ def _add_scan_parser(subparsers) -> None:
         epilog=textwrap.dedent("""\
             Examples
             ────────
+              doc2md scan                              # convert current folder
+              doc2md scan --dry-run                   # preview current folder
               doc2md scan C:\\FuSa\\ProjectDocs
               doc2md scan C:\\FuSa\\ProjectDocs --dry-run
               doc2md scan C:\\FuSa\\ProjectDocs --skip-existing
@@ -359,9 +368,12 @@ def _add_scan_parser(subparsers) -> None:
     p.add_argument(
         "root",
         metavar="ROOT",
+        nargs="?",
+        default=None,
         help=(
             "Root directory to scan recursively.  "
-            "All sub-folders are included.  Must be an existing directory."
+            "All sub-folders are included.  "
+            "Omit to use the current working directory automatically."
         ),
     )
 
@@ -476,9 +488,14 @@ def _run_scan(args: argparse.Namespace) -> None:
     import excel2md
     import word2md
 
-    root = Path(args.root).resolve()
+    if args.root is None:
+        root = Path.cwd()
+        logger.info("[scan]  No ROOT given — using current directory: %s", root)
+    else:
+        root = Path(args.root).resolve()
     if not root.is_dir():
-        sys.exit(f"Not a directory: {root}")
+        logger.error("error: not a directory: %s", root)
+        sys.exit(1)
 
     xlsx_files, docx_files = _collect_scan_targets(root)
     total = len(xlsx_files) + len(docx_files)
@@ -548,11 +565,7 @@ def _run_scan(args: argparse.Namespace) -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Entry point
-# ──────────────────────────────────────────────────────────────────────────────
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Drag-and-drop  (v1.3.0)
+# Drag-and-drop support
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _pause_on_windows() -> None:
@@ -561,9 +574,7 @@ def _pause_on_windows() -> None:
     When doc2md.exe is launched via drag-and-drop (or a double-click), the
     console window is created by Windows and destroyed as soon as the process
     exits.  Pausing lets the user read the output before the window closes.
-    This helper is a no-op on non-Windows platforms and when the process is
-    run from an existing terminal (stdout is not a TTY check is intentionally
-    skipped — drag-and-drop always attaches a TTY on Windows).
+    This helper is a no-op on non-Windows platforms.
     """
     import os
     if os.name == "nt":
@@ -573,17 +584,38 @@ def _pause_on_windows() -> None:
 def _detect_dragdrop(argv: list[str]) -> bool:
     """Return True when argv looks like a drag-and-drop invocation.
 
-    Heuristic: no recognised sub-command as first positional argument and
-    at least one argument that is a valid filesystem path.
+    A drag-and-drop call from Windows Explorer passes only file/folder paths
+    as positional arguments — no sub-command, no flags.
 
-    Recognised sub-commands are intentionally hard-coded so that a future
-    command named after a real filename is not misclassified.
+    Detection rules (ALL must be satisfied):
+      1. argv is not empty
+      2. argv[0] is not a known sub-command (exact match, no lstrip)
+      3. argv[0] does not start with "-" (not a flag)
+      4. Every argument is either:
+           - a .xlsx / .docx file that exists on disk, OR
+           - a directory that exists on disk
+         Any flag (starts with "-") or unsupported extension breaks the match.
     """
     _KNOWN_SUBCOMMANDS = {"excel", "word", "scan"}
+    _SUPPORTED_SUFFIXES = {".xlsx", ".docx"}
+
     if not argv:
         return False
-    first = argv[0].lstrip("-")          # ignore leading flag-like strings
-    return first not in _KNOWN_SUBCOMMANDS and Path(argv[0]).exists()
+
+    # Rule 2 & 3 — first arg must not be a sub-command or a flag
+    if argv[0] in _KNOWN_SUBCOMMANDS or argv[0].startswith("-"):
+        return False
+
+    # Rule 4 — every argument must be a supported file or directory
+    for arg in argv:
+        if arg.startswith("-"):
+            return False          # flag mixed in → CLI call
+        p = Path(arg)
+        if not p.exists():
+            return False          # non-existent path → let argparse report error
+        if p.is_file() and p.suffix.lower() not in _SUPPORTED_SUFFIXES:
+            return False          # unsupported extension → CLI call
+    return True
 
 
 def _run_dragdrop(paths: list[str]) -> None:
@@ -591,12 +623,10 @@ def _run_dragdrop(paths: list[str]) -> None:
 
     Routing rules
     ─────────────
-      Directory           → scan  (converts all .xlsx + .docx underneath)
-      .xlsx file          → excel (single-file conversion)
-      .docx file          → word  (single-file conversion)
-      Multiple files      → each file is dispatched individually (directories
-                            are dispatched as scan)
-      Unsupported suffix  → warning printed; file is skipped
+      .xlsx file   → excel (single-file conversion)
+      .docx file   → word  (single-file conversion)
+      Directory    → scan  (converts all .xlsx + .docx underneath)
+      Other suffix → warning printed; file is skipped
 
     Default converter options (identical to calling the sub-command with no
     extra flags) are used so that drag-and-drop 'just works' without a
@@ -606,7 +636,6 @@ def _run_dragdrop(paths: list[str]) -> None:
     import excel2md
     import word2md
 
-    # ── Defaults mirroring sub-command defaults ───────────────────────────────
     excel_kwargs: dict = dict(
         add_frontmatter=True,
         add_toc=True,
@@ -642,7 +671,7 @@ def _run_dragdrop(paths: list[str]) -> None:
                 _try_convert(f, p, word2md.convert, word_kwargs, False, stats)
             ok      += stats.ok
             skipped += stats.skipped
-            failed  += stats.failed
+            failed  += [(str(s), m) for s, m in stats.failed]
             continue
 
         # ── Single file ───────────────────────────────────────────────────────
@@ -690,6 +719,10 @@ def _run_dragdrop(paths: list[str]) -> None:
         sys.exit(1)
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Entry point
+# ──────────────────────────────────────────────────────────────────────────────
+
 def main() -> None:
     # ── Drag-and-drop fast-path ───────────────────────────────────────────────
     # When the user drags one or more files / folders onto doc2md.exe, Windows
@@ -704,11 +737,35 @@ def main() -> None:
         return
     # ─────────────────────────────────────────────────────────────────────────
 
-    parser = argparse.ArgumentParser(
+    # ── Custom parser with typo suggestion ──────────────────────────────────
+    class _SuggestingParser(argparse.ArgumentParser):
+        """ArgumentParser that suggests similar sub-commands on typos."""
+        def error(self, message: str) -> None:
+            # Check if the error is about an invalid subcommand choice
+            _KNOWN = ["excel", "word", "scan"]
+            args_raw = sys.argv[1:]
+            # Find the first non-flag argument (likely the mistyped subcommand)
+            candidate = next(
+                (a for a in args_raw if not a.startswith("-")), None
+            )
+            if candidate and candidate not in _KNOWN:
+                close = difflib.get_close_matches(candidate, _KNOWN, n=1, cutoff=0.5)
+                if close:
+                    self.print_usage(sys.stderr)
+                    sys.stderr.write(
+                        f"doc2md: error: unknown command '{candidate}'\n"
+                        f"       Did you mean:  doc2md {close[0]}\n"
+                        f"       Run 'doc2md --help' for available commands.\n"
+                    )
+                    sys.exit(2)
+            # Default error handling for everything else
+            super().error(message)
+
+    parser = _SuggestingParser(
         prog="doc2md",
-        description=textwrap.dedent("""\
+        description=textwrap.dedent(f"""\
             ╔══════════════════════════════════════════════════════════════╗
-            ║      doc2md — Functional-Safety Document → Markdown         ║
+            ║  doc2md v{__version__} — Functional-Safety Document → Markdown    ║
             ║         Converter for LLM-based Analysis Workflows          ║
             ╚══════════════════════════════════════════════════════════════╝
 
@@ -733,6 +790,13 @@ def main() -> None:
               doc2md word  FSR_v0.9.docx
               doc2md scan  ./ProjectDocs --dry-run
               doc2md scan  ./ProjectDocs
+              doc2md scan                            # current folder auto-scan
+
+            Drag & Drop  (Windows)
+            ──────────────────────
+              Drag one or more .xlsx / .docx files (or a folder) onto
+              doc2md.exe — conversion runs automatically, output .md is
+              placed next to each source file.
 
             Use 'doc2md <command> --help' for per-command option details.
         """),
@@ -773,7 +837,7 @@ def main() -> None:
         dest="command",
         metavar="<command>",
     )
-    subparsers.required = True
+    subparsers.required = False
 
     _add_excel_parser(subparsers)
     _add_word_parser(subparsers)
@@ -785,6 +849,11 @@ def main() -> None:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(message)s",
     )
+
+    # ── No sub-command: print help and exit cleanly ───────────────────────────
+    if not args.command:
+        parser.print_help()
+        sys.exit(0)
 
     if args.command == "excel":
         _run_excel(args)

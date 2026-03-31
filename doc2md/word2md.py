@@ -167,8 +167,13 @@ def _render_attr_block(table: Table) -> str:
         key_raw = row.cells[0].text.strip()
         key_lower = key_raw.lower()
 
-        # Skip the header row (Attribute / Description)
-        if key_lower in ("attribute", "description", ""):
+        # Skip blank-key rows and the column-header row (Attribute | Description).
+        # Only the exact header pair is skipped; real data rows whose key happens
+        # to be "Description" or "Attribute" are preserved.
+        if key_lower == "":
+            continue
+        val_raw = _cell_text_flat(row.cells[1]).strip().lower()
+        if key_lower == "attribute" and val_raw == "description":
             continue
 
         val_paras = _cell_paragraphs(row.cells[1])
