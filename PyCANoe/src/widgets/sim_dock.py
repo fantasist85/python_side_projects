@@ -62,6 +62,9 @@ class SimDock(QWidget):
         self._sim_dock = SimDock(self._channel_manager, self._sim_state, self)
     """
 
+    # MainWindow가 tx_echo를 Dispatcher에 연결할 수 있도록 위임 Signal
+    sim_worker_created = Signal(object)   # SimWorker 인스턴스
+
     def __init__(
         self,
         channel_manager: ChannelManager,
@@ -215,11 +218,14 @@ class SimDock(QWidget):
 
         from core.sim_worker import SimMessage, SimWorker
 
-        # SimWorker 없으면 생성
+        # SimWorker 없으면 생성. tx_echo → Dispatcher 연결은 MainWindow에 위임.
         if ctx.sim_worker is None:
             sw = SimWorker(ch_id, ctx.worker)
             ctx.sim_worker = sw
             sw.start()
+            # sim_worker_created Signal → MainWindow._on_sim_worker_created()
+            # MainWindow에서 tx_echo를 Dispatcher.on_message에 QueuedConnection 연결
+            self.sim_worker_created.emit(sw)
 
         sim_msg = SimMessage(
             arb_id      = data.get("arb_id", 0x100),

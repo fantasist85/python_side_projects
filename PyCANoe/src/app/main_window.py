@@ -90,6 +90,11 @@ class MainWindow(QMainWindow):
 
         # 설정 복원
         self._config.restore_window(self)
+        filter_id, filter_mask, auto_scroll = self._config.restore_trace_filter()
+        self._trace_dock.restore_filter(filter_id, filter_mask)
+        self._auto_scroll = auto_scroll
+        rolling_sec = self._config.restore_graph_window()
+        self._graph_dock.set_rolling_sec(rolling_sec)
 
     # ------------------------------------------------------------------
     # UI 초기화
@@ -113,6 +118,7 @@ class MainWindow(QMainWindow):
 
         from widgets.sim_dock import SimDock
         self._sim_dock = SimDock(self._channel_manager, self._sim_state, self)
+        self._sim_dock.sim_worker_created.connect(self._on_sim_worker_created)
         sim_dw = QDockWidget("Simulation (IG)", self)
         sim_dw.setObjectName("SimDock")
         sim_dw.setWidget(self._sim_dock)
@@ -240,8 +246,10 @@ class MainWindow(QMainWindow):
             self._signal_registry.enable_all()
             self._graph_dock.enable()
             self._graph_dw.show()
+            self._trace_dock.set_db_loaded(True)   # 우클릭 "Send to Graph" 활성화
             self._status_label.setText(f"DB 로드 완료 [{parser.db_type.upper()}]")
         else:
+            self._trace_dock.set_db_loaded(False)
             self._status_label.setText("DB 로드 실패")
             ErrorDialog.show_error("DBC/LDF 파일 로드에 실패했습니다.", parent=self)
 
@@ -299,6 +307,17 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Worker 이벤트 슬롯
     # ------------------------------------------------------------------
+
+    def _on_sim_worker_created(self, sim_worker) -> None:
+        """
+        SimDock.sim_worker_created Signal 수신.
+        tx_echo(ParsedMessage) → Dispatcher.on_message QueuedConnection 연결.
+        Trace 파랑 컬러링(is_tx=True)이 동작하려면 이 연결 필수.
+        """
+        sim_worker.tx_echo.connect(
+            self._dispatcher.on_message,
+            Qt.ConnectionType.QueuedConnection,
+        )
 
     def _on_worker_error(self, msg: str) -> None:
         logger.warning("Worker 오류: %s", msg)
