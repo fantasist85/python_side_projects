@@ -1,0 +1,16 @@
+VERSION ""
+
+NS_ :
+
+BS_:
+
+BU_:
+
+BO_ 416 EngineData: 8 Vector__XXX
+ SG_ EngSpeed : 0|16@1+ (0.25,0) [0|16383.75] "rpm" Vector__XXX
+ SG_ EngTemp  : 16|8@1+ (1,-40) [-40|215] "degC" Vector__XXX
+ SG_ ThrottlePos : 24|8@1+ (0.392157,0) [0|100] "%" Vector__XXX
+
+BO_ 512 BrakeData: 4 Vector__XXX
+ SG_ BrakePressure : 0|12@1+ (0.1,0) [0|409.5] "bar" Vector__XXX
+
