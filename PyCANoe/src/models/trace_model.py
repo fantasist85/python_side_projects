@@ -24,6 +24,8 @@ class TraceModel(QAbstractTableModel):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._rows: list[ParsedMessage] = []
+        self._filter_id:   int | None = None
+        self._filter_mask: int        = 0x7FF
 
     # ------------------------------------------------------------------
     # QAbstractTableModel 필수 구현
@@ -67,7 +69,17 @@ class TraceModel(QAbstractTableModel):
         INPUT: list[ParsedMessage]. QTimer(50ms) 슬롯에서만 호출.
         beginInsertRows/endInsertRows 배치 처리 — 단건 emit보다 100배+ 빠름.
         MAX_ROWS 초과 시 오래된 행 제거 후 삽입.
+        SW ID 필터 적용.
         """
+        if not batch:
+            return
+
+        # SW 필터 적용
+        if self._filter_id is not None:
+            batch = [
+                m for m in batch
+                if (m.arb_id & self._filter_mask) == (self._filter_id & self._filter_mask)
+            ]
         if not batch:
             return
 
@@ -89,6 +101,21 @@ class TraceModel(QAbstractTableModel):
         self.beginResetModel()
         self._rows.clear()
         self.endResetModel()
+
+    def get_row(self, row: int) -> ParsedMessage | None:
+        """우클릭 컨텍스트 메뉴에서 행 데이터 조회."""
+        if 0 <= row < len(self._rows):
+            return self._rows[row]
+        return None
+
+    def set_filter(self, filter_id: int, filter_mask: int) -> None:
+        """SW ID 필터 설정. 이후 append_batch()에서 적용."""
+        self._filter_id   = filter_id
+        self._filter_mask = filter_mask
+
+    def clear_filter(self) -> None:
+        """필터 초기화."""
+        self._filter_id = None
 
     # ------------------------------------------------------------------
     # 내부 표시 헬퍼

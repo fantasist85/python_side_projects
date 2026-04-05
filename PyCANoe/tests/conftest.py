@@ -9,6 +9,9 @@ from typing import Callable
 
 import pytest
 
+# headless 환경(CI/서버)에서 QApplication Abort 방지
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
 # src/ 경로를 Python path에 추가
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
