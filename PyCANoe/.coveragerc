@@ -1,0 +1,9 @@
+[run]
+concurrency = thread
+source = src
+branch = False
+
+[report]
+omit =
+    */test_*
+    */__pycache__/*

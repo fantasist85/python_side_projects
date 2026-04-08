@@ -1,5 +1,5 @@
 # core/channel_manager.py
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from PySide6.QtCore import Qt
 
 
@@ -9,12 +9,26 @@ class ChannelConfig:
     interface:    str
     channel:      int
     bitrate:      int
-    fd_mode:      bool     = False
-    data_bitrate: int      = 2_000_000
-    app_name:     str      = "PyCANoe"
+    fd_mode:      bool      = False
+    data_bitrate: int       = 2_000_000
+    app_name:     str       = "PyCANoe"
     db_path:      str | None = None
     hw_id_filter: int | None = None
     hw_id_mask:   int | None = None
+
+    # ── Vector 전용 ────────────────────────────────────────────────────
+    # app_name은 위에서 공용으로 사용 (Vector app_name 동일)
+
+    # ── SocketCAN 전용 ─────────────────────────────────────────────────
+    # channel 필드가 인터페이스명으로 사용됨 (예: "vcan0", "can0")
+    # → channel은 str이 아니라 int 유지하고 socketcan_ifname 별도 관리
+    socketcan_ifname: str   = "vcan0"   # SocketCAN 인터페이스명
+
+    # ── PCAN 전용 ──────────────────────────────────────────────────────
+    pcan_channel: str       = "PCAN_USBBUS1"  # PEAK PCAN 채널 ID
+
+    # ── Kvaser 전용 ────────────────────────────────────────────────────
+    # Kvaser는 channel(int) 그대로 사용 — 추가 파라미터 없음
 
 
 @dataclass

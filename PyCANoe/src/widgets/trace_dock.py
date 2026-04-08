@@ -7,15 +7,19 @@ INPUT   : TraceModel (QAbstractTableModel)
 OUTPUT  : send_to_graph(int, str), send_to_sim(int, int, int, bytes) Signal
 DO NOT  : Worker Thread에서 UI 위젯 직접 접근
 
+채널 탭 (Rev 6.0 구현):
+  [All][CH1][CH2][CH3][CH4] — 탭 클릭 시 TraceModel.set_ch_filter() 연동.
+  채널이 추가된 탭만 활성화. add_channel_tab() / remove_channel_tab() 제공.
+
+SW 필터 UI:
+  - ID 입력 LineEdit + Mask 입력 LineEdit + [적용] [초기화] 버튼
+  - TraceModel.set_filter() / clear_filter() 연결
+
 우클릭 컨텍스트 메뉴 (명세서 8.2):
   - "이 ID 필터링"    — arb_id를 필터 바에 자동 입력
   - "클립보드로 복사" — HEX 데이터 복사
   - "Send to Graph"   — DBC 있을 때만 활성 (_db_loaded 플래그)
   - "Send to Simulation" — arb_id, data, dlc 자동 등록
-
-SW 필터 UI:
-  - ID 입력 LineEdit + Mask 입력 LineEdit + [적용] [초기화] 버튼
-  - TraceModel.set_filter() / clear_filter() 연결
 """
 from __future__ import annotations
 
@@ -30,6 +34,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMenu,
     QPushButton,
+    QTabBar,
     QTreeView,
     QVBoxLayout,
     QWidget,
@@ -38,6 +43,10 @@ from PySide6.QtWidgets import (
 from models.trace_model import TraceModel
 
 logger = logging.getLogger(__name__)
+
+# 채널 탭 레이블 (인덱스 0 = All)
+_TAB_ALL = "All"
+_MAX_CH  = 4
 
 
 class TraceDock(QWidget):
@@ -55,8 +64,9 @@ class TraceDock(QWidget):
 
     def __init__(self, model: TraceModel, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._model     = model
-        self._db_loaded = False   # DBC 로드 완료 여부 — "Send to Graph" 활성 조건
+        self._model      = model
+        self._db_loaded  = False   # DBC 로드 완료 여부 — "Send to Graph" 활성 조건
+        self._active_chs: set[int] = set()   # 활성화된 채널 ch_id 집합
 
         self._build_ui()
 
@@ -68,6 +78,16 @@ class TraceDock(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
+
+        # ── 채널 탭 바 ────────────────────────────────────────────────
+        self._tab_bar = QTabBar(self)
+        self._tab_bar.setExpanding(False)
+        self._tab_bar.addTab(_TAB_ALL)    # 인덱스 0 = All (항상 존재)
+        for i in range(_MAX_CH):
+            self._tab_bar.addTab(f"CH{i + 1}")
+            self._tab_bar.setTabEnabled(i + 1, False)   # 채널 추가 전 비활성
+        self._tab_bar.currentChanged.connect(self._on_tab_changed)
+        layout.addWidget(self._tab_bar)
 
         # ── 필터 바 ───────────────────────────────────────────────────
         layout.addWidget(self._build_filter_bar())
@@ -87,7 +107,6 @@ class TraceDock(QWidget):
         header = self._view.header()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         header.setStretchLastSection(True)
-        # 주요 컬럼 초기 너비 (Ch, Timestamp, Type, ID, DLC)
         for col, width in enumerate([40, 100, 55, 70, 45]):
             self._view.setColumnWidth(col, width)
 
@@ -133,6 +152,66 @@ class TraceDock(QWidget):
         h.addStretch()
 
         return bar
+
+    # ------------------------------------------------------------------
+    # 채널 탭 슬롯
+    # ------------------------------------------------------------------
+
+    def _on_tab_changed(self, index: int) -> None:
+        """
+        탭 변경 시 TraceModel 채널 필터 갱신.
+        index 0 = All → clear_ch_filter()
+        index 1..4 = CH1..4 → set_ch_filter(ch_id)
+        """
+        if index == 0:
+            self._model.clear_ch_filter()
+            logger.debug("TraceDock: 채널 탭 → All")
+        else:
+            ch_id = index - 1   # 탭 인덱스 1→ch_id 0, 탭 인덱스 2→ch_id 1, ...
+            self._model.set_ch_filter(ch_id)
+            logger.debug("TraceDock: 채널 탭 → CH%d", ch_id + 1)
+        # 필터 변경 후 뷰 갱신
+        self._model.layoutChanged.emit()
+
+    # ------------------------------------------------------------------
+    # 채널 탭 외부 인터페이스
+    # ------------------------------------------------------------------
+
+    def add_channel_tab(self, ch_id: int) -> None:
+        """
+        채널 추가 시 MainWindow에서 호출.
+        해당 CH 탭을 활성화한다.
+        """
+        if 0 <= ch_id < _MAX_CH:
+            self._active_chs.add(ch_id)
+            self._tab_bar.setTabEnabled(ch_id + 1, True)
+            logger.debug("TraceDock: CH%d 탭 활성화", ch_id + 1)
+
+    def remove_channel_tab(self, ch_id: int) -> None:
+        """
+        채널 제거 시 MainWindow에서 호출.
+        해당 CH 탭을 비활성화하고 All 탭으로 이동.
+        """
+        if 0 <= ch_id < _MAX_CH:
+            self._active_chs.discard(ch_id)
+            self._tab_bar.setTabEnabled(ch_id + 1, False)
+            # 현재 탭이 제거된 채널이면 All로 복귀
+            if self._tab_bar.currentIndex() == ch_id + 1:
+                self._tab_bar.setCurrentIndex(0)
+            logger.debug("TraceDock: CH%d 탭 비활성화", ch_id + 1)
+
+    def refresh_channel_tabs(self, active_ch_ids: list[int]) -> None:
+        """
+        현재 활성 채널 목록으로 탭 상태를 일괄 갱신.
+        ChannelManager.add_channel() / remove_channel() 이후 호출.
+        """
+        for i in range(_MAX_CH):
+            enabled = i in active_ch_ids
+            self._tab_bar.setTabEnabled(i + 1, enabled)
+            if enabled:
+                self._active_chs.add(i)
+            else:
+                self._active_chs.discard(i)
 
     # ------------------------------------------------------------------
     # 필터 슬롯
@@ -198,12 +277,10 @@ class TraceDock(QWidget):
         menu.exec(self._view.viewport().mapToGlobal(pos))
 
     def _apply_id_filter(self, arb_id: int) -> None:
-        """우클릭 'ID 필터링' — 필터 바에 arb_id 자동 입력 후 적용."""
         self._le_filter_id.setText(f"{arb_id:X}")
         self._on_filter_apply()
 
     def _copy_to_clipboard(self, msg) -> None:
-        """우클릭 '클립보드로 복사' — 행 정보를 텍스트로 복사."""
         text = (
             f"CH{msg.ch_id + 1}  "
             f"ts={msg.timestamp:.4f}  "
@@ -215,9 +292,6 @@ class TraceDock(QWidget):
         logger.debug("TraceDock: 클립보드 복사 완료")
 
     def _send_signals_to_graph(self, msg) -> None:
-        """
-        우클릭 'Send to Graph' — signals 딕셔너리의 신호를 순서대로 Graph에 전달.
-        """
         if not msg.signals:
             return
         for sig_name in msg.signals:
@@ -228,28 +302,18 @@ class TraceDock(QWidget):
     # ------------------------------------------------------------------
 
     def scroll_to_bottom(self) -> None:
-        """Auto-Scroll — MainWindow._flush_trace()에서 QTimer(50ms)마다 호출."""
         self._view.scrollToBottom()
 
     def set_db_loaded(self, loaded: bool) -> None:
-        """
-        DBC/LDF 로드 완료 시 MainWindow._on_db_loaded()에서 호출.
-        True이면 우클릭 'Send to Graph' 활성화.
-        """
         self._db_loaded = loaded
 
     def get_filter(self) -> tuple[str, str]:
-        """
-        MainWindow.closeEvent()에서 QSettings 저장용 호출.
-        반환: (filter_id_hex_str, filter_mask_hex_str)
-        """
         return (
             self._le_filter_id.text().strip(),
             self._le_filter_mask.text().strip(),
         )
 
     def restore_filter(self, filter_id: str, filter_mask: str) -> None:
-        """ConfigManager.restore_trace_filter() 값으로 UI 복원."""
         if filter_id:
             self._le_filter_id.setText(filter_id)
         if filter_mask:

@@ -26,6 +26,7 @@ class TraceModel(QAbstractTableModel):
         self._rows: list[ParsedMessage] = []
         self._filter_id:   int | None = None
         self._filter_mask: int        = 0x7FF
+        self._ch_filter:   int | None = None   # None=All, 0..3=채널 필터
 
     # ------------------------------------------------------------------
     # QAbstractTableModel 필수 구현
@@ -83,7 +84,17 @@ class TraceModel(QAbstractTableModel):
         if not batch:
             return
 
-        # 초과분 앞에서 제거
+        # 채널 탭 필터 적용
+        if self._ch_filter is not None:
+            batch = [m for m in batch if m.ch_id == self._ch_filter]
+        if not batch:
+            return
+
+        # 배치 자체가 MAX_ROWS보다 크면 최신 MAX_ROWS개만 유지
+        if len(batch) > self.MAX_ROWS:
+            batch = batch[-self.MAX_ROWS:]
+
+        # 기존 행 + 배치가 MAX_ROWS 초과 시 오래된 행 제거
         total = len(self._rows) + len(batch)
         if total > self.MAX_ROWS:
             remove_count = total - self.MAX_ROWS
@@ -116,6 +127,18 @@ class TraceModel(QAbstractTableModel):
     def clear_filter(self) -> None:
         """필터 초기화."""
         self._filter_id = None
+
+    def set_ch_filter(self, ch_id: int | None) -> None:
+        """
+        채널 탭 필터 설정.
+        ch_id=None  → 전체 채널 표시 (All 탭)
+        ch_id=0..3  → 해당 채널만 표시
+        """
+        self._ch_filter = ch_id
+
+    def clear_ch_filter(self) -> None:
+        """채널 탭 필터 해제 (All 탭과 동일)."""
+        self._ch_filter = None
 
     # ------------------------------------------------------------------
     # 내부 표시 헬퍼

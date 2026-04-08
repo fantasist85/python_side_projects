@@ -50,6 +50,8 @@ class ConfigManager:
 
     def save_channels(self, configs: list[tuple[int, ChannelConfig]]) -> None:
         """채널 설정 저장. configs = [(ch_id, ChannelConfig), ...]"""
+        # settings_version 없으면 restore_channels()의 _migrate()가 v0으로 판단해 clear() 호출
+        self._qs.setValue("settings_version", SETTINGS_VERSION)
         self._qs.setValue("channel/count", len(configs))
         for ch_id, cfg in configs:
             prefix = f"channel/{ch_id}"

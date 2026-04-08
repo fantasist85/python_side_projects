@@ -284,11 +284,34 @@ class GraphDock(QWidget):
 
     def _on_add_signal_clicked(self) -> None:
         """
-        [+ 신호 추가] 버튼 — 현재는 외부에서 add_signal()을 직접 호출.
-        TraceDock 우클릭 "Send to Graph" 또는 여기서 팝업으로 선택.
-        TODO(M4): DBC 트리 팝업 구현
+        [+ 신호 추가] 버튼 — 신호 선택 팝업 다이얼로그 표시.
+        등록된 신호가 없으면 안내 메시지 표시.
         """
-        logger.debug("GraphDock: + 신호 추가 버튼 클릭 (Trace 우클릭 'Send to Graph' 사용)")
+        if not self._enabled:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.information(
+                self, "안내",
+                "DBC/LDF 파일을 먼저 로드한 후 신호를 추가할 수 있습니다.\n"
+                "또는 Trace 뷰에서 우클릭 → 'Send to Graph'를 사용하세요."
+            )
+            return
+
+        # 현재 SignalBufferRegistry에 등록된 신호 목록 수집
+        available: list[tuple[int, str]] = sorted(self._registry._bufs.keys())
+        if not available:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.information(
+                self, "안내",
+                "표시할 신호가 없습니다.\n"
+                "Trace 뷰에서 메시지를 수신한 후 우클릭 → 'Send to Graph'를 사용하거나,\n"
+                "CAN 수신 중에 다시 시도하세요."
+            )
+            return
+
+        dlg = _SignalSelectDialog(available, self._plot_items, self)
+        if dlg.exec():
+            for ch_id, sig_name in dlg.selected_signals():
+                self.add_signal(ch_id, sig_name)
 
     def _on_signal_tree_remove(self, item: QTreeWidgetItem, col: int) -> None:
         """더블클릭으로 신호 제거."""
@@ -308,3 +331,135 @@ class GraphDock(QWidget):
         idx = self._cb_window.findData(sec)
         if idx >= 0:
             self._cb_window.setCurrentIndex(idx)
+
+
+# ---------------------------------------------------------------------------
+# 신호 선택 다이얼로그 (GraphDock 전용 내부 클래스)
+# ---------------------------------------------------------------------------
+
+class _SignalSelectDialog:
+    """
+    [+ 신호 추가] 버튼 클릭 시 표시되는 신호 선택 팝업.
+
+    SignalBufferRegistry에 등록된 (ch_id, sig_name) 목록을 체크박스로 표시.
+    이미 그래프에 추가된 신호는 체크 및 비활성화.
+
+    사용법:
+        dlg = _SignalSelectDialog(available, already_added, parent)
+        if dlg.exec():
+            for ch_id, sig_name in dlg.selected_signals():
+                self.add_signal(ch_id, sig_name)
+    """
+
+    def __init__(
+        self,
+        available: list[tuple[int, str]],
+        already_added: dict,
+        parent=None,
+    ) -> None:
+        from PySide6.QtWidgets import (
+            QDialog, QVBoxLayout, QHBoxLayout, QLabel,
+            QListWidget, QListWidgetItem, QDialogButtonBox,
+            QPushButton, QLineEdit,
+        )
+        from PySide6.QtCore import Qt
+
+        self._dialog = QDialog(parent)
+        self._dialog.setWindowTitle("신호 추가")
+        self._dialog.setMinimumSize(380, 420)
+        self._dialog.setModal(True)
+
+        layout = QVBoxLayout(self._dialog)
+        layout.setSpacing(8)
+
+        # 안내 레이블
+        lbl = QLabel(
+            "그래프에 추가할 신호를 선택하세요.\n"
+            "(이미 추가된 신호는 회색으로 표시)"
+        )
+        lbl.setStyleSheet("color: gray; font-size: 11px;")
+        layout.addWidget(lbl)
+
+        # 검색 필드
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("신호명 검색...")
+        self._search.setClearButtonEnabled(True)
+        layout.addWidget(self._search)
+
+        # 신호 목록 (체크박스)
+        self._list = QListWidget()
+        self._list.setSelectionMode(QListWidget.SelectionMode.NoSelection)
+        layout.addWidget(self._list)
+
+        # 전체 선택 / 해제 버튼 행
+        btn_row = QHBoxLayout()
+        btn_all = QPushButton("전체 선택")
+        btn_none = QPushButton("전체 해제")
+        btn_all.setFixedWidth(80)
+        btn_none.setFixedWidth(80)
+        btn_all.clicked.connect(self._select_all)
+        btn_none.clicked.connect(self._select_none)
+        btn_row.addWidget(btn_all)
+        btn_row.addWidget(btn_none)
+        btn_row.addStretch()
+        layout.addLayout(btn_row)
+
+        # OK / Cancel
+        bbox = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok |
+            QDialogButtonBox.StandardButton.Cancel
+        )
+        bbox.accepted.connect(self._dialog.accept)
+        bbox.rejected.connect(self._dialog.reject)
+        layout.addWidget(bbox)
+
+        # 항목 채우기
+        self._items: list[tuple[QListWidgetItem, int, str]] = []
+        for ch_id, sig_name in available:
+            item = QListWidgetItem(f"CH{ch_id + 1}  {sig_name}")
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            already = (ch_id, sig_name) in already_added
+            item.setCheckState(
+                Qt.CheckState.Checked if already else Qt.CheckState.Unchecked
+            )
+            if already:
+                item.setForeground(self._dialog.palette().color(
+                    self._dialog.palette().ColorRole.Mid
+                ))
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEnabled)
+            self._list.addItem(item)
+            self._items.append((item, ch_id, sig_name))
+
+        # 검색 연결
+        self._search.textChanged.connect(self._on_search)
+
+    def _select_all(self) -> None:
+        from PySide6.QtCore import Qt
+        for item, ch_id, sig in self._items:
+            if item.flags() & Qt.ItemFlag.ItemIsEnabled:
+                item.setCheckState(Qt.CheckState.Checked)
+
+    def _select_none(self) -> None:
+        from PySide6.QtCore import Qt
+        for item, ch_id, sig in self._items:
+            if item.flags() & Qt.ItemFlag.ItemIsEnabled:
+                item.setCheckState(Qt.CheckState.Unchecked)
+
+    def _on_search(self, text: str) -> None:
+        text = text.lower()
+        for i in range(self._list.count()):
+            item = self._list.item(i)
+            item.setHidden(text not in item.text().lower())
+
+    def exec(self) -> bool:
+        return self._dialog.exec() == self._dialog.DialogCode.Accepted
+
+    def selected_signals(self) -> list[tuple[int, str]]:
+        """OK 클릭 후 체크된 신호 목록 반환."""
+        from PySide6.QtCore import Qt
+        result = []
+        for item, ch_id, sig_name in self._items:
+            if (item.checkState() == Qt.CheckState.Checked and
+                    item.flags() & Qt.ItemFlag.ItemIsEnabled):
+                result.append((ch_id, sig_name))
+        return result

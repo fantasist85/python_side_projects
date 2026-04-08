@@ -14,6 +14,71 @@ logger = logging.getLogger(__name__)
 MAX_RETRY = 5
 RETRY_BACKOFF_SEC = [1, 2, 4, 8, 16]
 
+# 인터페이스별 추가 kwargs 생성 함수 — CANWorker 외부에서 단독 테스트 가능
+_IFACE_NO_FD = frozenset({"virtual", "socketcan", "pcan"})
+
+
+def build_bus_kwargs(config: "ChannelConfig") -> dict:
+    """
+    인터페이스 종류에 따라 python-can Bus() kwargs 딕셔너리 생성.
+
+    THREAD  : Worker Thread (CANWorker.run() 내부) 또는 테스트 코드
+    INPUT   : ChannelConfig
+    OUTPUT  : dict — can.Bus(**kwargs) 에 직접 전달 가능
+    DO NOT  : UI 위젯 접근, 예외 발생
+    """
+    iface = config.interface
+
+    if iface == "virtual":
+        return {
+            "interface": "virtual",
+            "channel":   str(config.channel),
+        }
+
+    if iface == "socketcan":
+        return {
+            "interface": "socketcan",
+            "channel":   config.socketcan_ifname,
+        }
+
+    if iface == "pcan":
+        return {
+            "interface": "pcan",
+            "channel":   config.pcan_channel,
+            "bitrate":   config.bitrate,
+        }
+
+    if iface == "kvaser":
+        kwargs: dict = {
+            "interface": "kvaser",
+            "channel":   config.channel,
+            "bitrate":   config.bitrate,
+        }
+        if config.fd_mode:
+            kwargs["fd"]           = True
+            kwargs["data_bitrate"] = config.data_bitrate
+        return kwargs
+
+    if iface == "vector":
+        kwargs = {
+            "interface": "vector",
+            "channel":   config.channel,
+            "bitrate":   config.bitrate,
+            "app_name":  config.app_name,
+        }
+        if config.fd_mode:
+            kwargs["fd"]           = True
+            kwargs["data_bitrate"] = config.data_bitrate
+        return kwargs
+
+    # 알 수 없는 인터페이스 — 최소 공통 파라미터로 fallback
+    logger.warning("알 수 없는 인터페이스 '%s' — 기본 kwargs 사용", iface)
+    return {
+        "interface": iface,
+        "channel":   config.channel,
+        "bitrate":   config.bitrate,
+    }
+
 
 class WorkerState(Enum):
     INIT     = auto()
@@ -139,15 +204,8 @@ class CANWorker(QThread):
 
     def _connect_and_listen(self) -> None:
         """Bus 연결 + 수신 루프. stop() 호출 시 정상 탈출."""
-        kwargs: dict = {
-            "interface": self._config.interface,
-            "channel":   self._config.channel,
-            "bitrate":   self._config.bitrate,
-        }
-        # virtual 인터페이스는 fd/app_name 파라미터 미지원
-        if self._config.interface not in ("virtual",):
-            kwargs["fd"]       = self._config.fd_mode
-            kwargs["app_name"] = self._config.app_name
+        kwargs = build_bus_kwargs(self._config)
+        logger.debug("CH%d Bus() kwargs: %s", self._ch_id, kwargs)
 
         with can.Bus(**kwargs) as bus:
             self._bus = bus

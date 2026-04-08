@@ -25,7 +25,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
@@ -289,8 +289,7 @@ class _SimMessageDetail(QWidget):
     선택된 SimMessage의 상세 설정 폼.
     Physical / Raw Hex 전환 지원.
     """
-    from PySide6.QtCore import Signal as _Signal
-    value_changed = _Signal(dict)
+    value_changed = Signal(dict)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
