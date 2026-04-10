@@ -1,13 +1,14 @@
 # PyCANoe 프로젝트 설계 명세서
 
-> **Rev. 9.0** — AI 구현 안전성 강화. 단일 파일 유지.
+> **Rev. 10.0** — M8 LIN H/W 지원 스코프 추가. pytest 환경 규칙 추가.
 >
 > | 버전 | 주요 변경 |
 > |---|---|
 > | Rev 1.0~6.0 | 아키텍처 확립, 버그 수정 6종, 설계 개선 다수 |
 > | Rev 7.0 | sentinel 패턴, stop() 폴링, QueuedConnection 명시, AsyncDbLoader 연속 로드 수정 |
 > | Rev 8.0 | AI 구현 명세서로 전면 리팩토링. AI Rules / Thread Ownership / Error Policy / Implementation Order / 누락 인터페이스 명세 추가. 버전 히스토리 상세 제거. 토큰 최적화. |
-> | **Rev 9.0** | **AI 구현 안전성 강화: SimWorker 복사 규칙, Shutdown 시퀀스, LogWorker while-else 설명, SignalBuffer 활성화 트리거, update_db() lock 주석, STEP 완료 기준, AsyncDbLoader disconnect 위치, conftest.py fixture 목록 추가.** |
+> | Rev 9.0 | AI 구현 안전성 강화: SimWorker 복사 규칙, Shutdown 시퀀스, LogWorker while-else 설명, SignalBuffer 활성화 트리거, update_db() lock 주석, STEP 완료 기준, AsyncDbLoader disconnect 위치, conftest.py fixture 목록 추가. |
+> | **Rev 10.0** | **M8 LIN H/W 지원 스코프 추가 (ChannelConfig.bus_type, build_bus_kwargs LIN 분기). pytest 환경 규칙 추가 (uv 환경 금지, 시스템 Python 사용).** |
 
 ---
 
@@ -156,15 +157,17 @@ PySide6 기반 경량 고성능 CAN/LIN 네트워크 분석·시뮬레이션 도
 
 ### 1.2 기능 범위
 
-| In-Scope (v1.0) | Future Scope |
-|:---|:---|
-| **Trace:** CAN/LIN 실시간 추적, 4채널, HW/SW 필터, Tx/Rx/Error 컬러링 | UDS 진단 |
-| **Graph:** DBC/LDF 기반 신호 그래프 (DB 없으면 비활성) | PCAN 등 추가 H/W |
-| **Sim:** CANoe IG 스타일 주기 전송, Physical/Raw Hex 입력 | Replay (ASC/BLF) |
-| **DB:** DBC/LIN 비동기 로딩, Graceful Degradation, 메시지 정의 캐싱 | Virtual Node Engine (M7) |
-| **Log:** ASC 우선, BLF/CSV 추가, 비동기, Log Rotation 100MB | BLF 고급 포맷 |
-| **H/W:** Vector (VN16xx), Kvaser, virtual (CI/테스트) | |
-| **배포:** PyInstaller 단일 .exe | |
+| In-Scope (v1.0) | 상태 | Future Scope |
+|:---|:---:|:---|
+| **Trace:** CAN/LIN 실시간 추적, 4채널, HW/SW 필터, Tx/Rx/Error 컬러링 | ✅ M3 | UDS 진단 |
+| **Graph:** DBC/LDF 기반 신호 그래프 (DB 없으면 비활성) | ✅ M4 | Replay (ASC/BLF) |
+| **Sim:** CANoe IG 스타일 주기 전송, Physical/Raw Hex 입력 | ✅ M5 | BLF 고급 포맷 |
+| **DB:** DBC/LDF 비동기 로딩, Graceful Degradation, 메시지 정의 캐싱 | ✅ M6 | |
+| **Log:** ASC 우선, BLF/CSV 추가, 비동기, Log Rotation 100MB | ✅ M6 | |
+| **Virtual Node Engine:** Python 스크립트 기반 CAPL 대체 노드 | ✅ M7 | 핫리로드, arb_id 필터링 |
+| **H/W:** Vector (VN16xx), Kvaser, virtual, SocketCAN, PCAN — CAN 버스 | ✅ M6 | |
+| **H/W:** LIN 버스 (python-can LinBus, Vector LIN) | 🔲 M8 | |
+| **배포:** PyInstaller 단일 .exe | 🔲 최종 검증 필요 | |
 
 ---
 
@@ -1443,7 +1446,7 @@ a = Analysis(
 
 ---
 
-### M7 (Future) — Virtual Node Engine
+### M7 — Virtual Node Engine ✅ 완료 (11차)
 
 사용자 Python 스크립트로 독립 시뮬레이션 노드 구성. (CANoe CAPL 대체)
 
@@ -1451,8 +1454,49 @@ a = Analysis(
 - `on_message(msg: ParsedMessage)` 콜백
 - `on_timer(interval_ms)` 주기 콜백
 - `bus.send(arb_id, data)` API
+- is_tx=True 메시지 차단 (무한 루프 방지)
+- 예외 격리: 노드 오류가 전체 시스템에 전파되지 않음
 
-> **주의:** Virtual Node Engine 구현 시 MessageDispatcher 복잡도 급증 가능. Event Bus 패턴 전환 검토 시점.
+**AC:** 630/630 통과, 커버리지 95%
+
+---
+
+### M8 — LIN H/W 버스 지원 🔲 계획 (13차~)
+
+**목표:** LIN DB 지원(LDF 파싱)은 M6에서 완료. M8에서 실제 LIN H/W 버스 연결 추가.
+
+**Task:**
+
+1. `ChannelConfig`에 `bus_type: Literal["can", "lin"] = "can"` 필드 추가
+2. `build_bus_kwargs()`에 LIN 분기 추가 (`python-can LinBus` 파라미터)
+3. `CANWorker._connect_and_listen()`에서 bus_type 분기 처리
+4. `ChannelDialog`에 LIN 탭 추가 (인터페이스·baud rate 선택)
+5. `ChannelConfig` QSettings 저장/복원에 `bus_type` 포함
+6. 단위 테스트 추가 (목표: 680개+)
+
+```python
+# M8 ChannelConfig 변경 예정
+@dataclass
+class ChannelConfig:
+    interface:    str
+    channel:      int
+    bitrate:      int
+    bus_type:     str  = "can"   # ← M8 신규. "can" | "lin"
+    fd_mode:      bool = False
+    data_bitrate: int  = 2_000_000
+    app_name:     str  = "PyCANoe"
+    db_path:      str | None = None
+    hw_id_filter: int | None = None
+    hw_id_mask:   int | None = None
+    socketcan_ifname: str = "vcan0"
+    pcan_channel:     str = "PCAN_USBBUS1"
+```
+
+**AC:**
+- [ ] LIN 채널 추가 → python-can LinBus 연결 성공
+- [ ] LDF 로드 → LIN 메시지 Trace에 표시
+- [ ] 단위 테스트 680개+ 통과, 커버리지 95% 유지
+- [ ] CAN 기존 기능 회귀 없음
 
 ---
 

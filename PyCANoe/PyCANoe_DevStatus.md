@@ -2,7 +2,7 @@
 
 > **기준 브랜치:** `PyCANoe`
 > **명세서 버전:** Rev 9.0
-> **기록 갱신일:** 2026-04-08 (11차 세션 — M7 Virtual Node Engine 완료)
+> **기록 갱신일:** 2026-04-10 (12차 세션 — Phase 0 git 정리 & 문서 최신화)
 > **현재 상태:** M1~M7 전체 완료. 테스트 630개 / 커버리지 95%
 
 ---
@@ -17,80 +17,66 @@
 | M4 | Graph Dock | ✅ **완료** | 신호 추가 팝업 구현 완료 (7차) |
 | M5 | Simulation (IG) | ✅ **완료** | tx_echo, _messages_lock, drift 보정 |
 | M6 | 통합, 안정화, 최종 배포 | ✅ **완료** | 373/373 통과, 커버리지 82% |
-| **M7** | **Virtual Node Engine** | ✅ **완료** | **630/630 통과, 커버리지 95% (11차)** |
+| M7 | Virtual Node Engine | ✅ **완료** | 630/630 통과, 커버리지 95% (11차) |
+| **M8** | **LIN H/W 버스 지원** | 🔲 **계획** | **python-can LinBus + ChannelDialog LIN 탭** |
 
 ---
 
-## 2. 이번 세션(11차) 작업 내역 — M7 Virtual Node Engine
+## 2. 이번 세션(12차) 작업 내역 — Phase 0 git 정리
 
-### 2-1. 신규 파일
+### 2-1. 작업 내용
 
-| 파일 | 역할 |
+| 항목 | 내용 |
 |:---|:---|
-| `src/core/virtual_node_engine.py` | BusProxy, VirtualNodeWorker(QThread), VirtualNodeEngine |
-| `src/widgets/virtual_node_dock.py` | Virtual Node 관리 UI Dock (로드/정지/로그 콘솔) |
-| `tests/test_virtual_node_engine.py` | M7 단위 테스트 50개 |
-| `examples/virtual_node_heartbeat.py` | 예제: 100ms 주기 Heartbeat 전송 스크립트 |
-| `examples/virtual_node_responder.py` | 예제: DBC 신호 기반 조건부 응답 스크립트 |
+| 테스트 검증 | 630/630 패스 확인 (커버리지 95% 유지) |
+| 문서 최신화 | PyCANoe_DevStatus.md Rev 12차 갱신 |
+| 문서 최신화 | PyCANoe.md M8 마일스톤 스코프 추가 |
+| git 커밋 | M1~M7 전체 코드 커밋 & 푸시 완료 |
 
-### 2-2. 수정 파일
+### 2-2. 환경 메모
 
-| 파일 | 변경 내용 |
-|:---|:---|
-| `src/app/main_window.py` | VNE import·초기화, VirtualNodeDock 추가, View 메뉴 항목, add_channel 양쪽에 Worker→VNE 연결, closeEvent unload_all, _reset_layout VN Dock 초기화 |
-
-### 2-3. M7 아키텍처 설계 요약
-
-```
-[CANWorker-N]
-     │  parsed_message_received Signal (QueuedConnection)
-     ├──► [MessageDispatcher]   — 기존 fan-out (Trace/Log/Graph/Sim)
-     └──► [VirtualNodeEngine.on_all_messages]   ← 신규 (M7)
-                │
-                │  is_tx=True 메시지 → 차단 (무한 루프 방지)
-                │
-                ▼  enqueue_message()
-         [VirtualNodeWorker × N]   (QThread, 노드당 1개)
-                │  on_start / on_message / on_timer 콜백 실행
-                │  예외 격리 — 노드 중단 없음
-                │
-                ▼  BusProxy.send_requested Signal (QueuedConnection)
-         [VirtualNodeEngine._on_send_requested]   ← Main Thread
-                │
-                ▼  CANWorker.send() + increment_tx()
-         [H/W Bus]
-```
-
-### 2-4. 커버리지 결과 (11차)
-
-| 파일 | 커버리지 |
-|:---|:---:|
-| `src/core/virtual_node_engine.py` | **99%** |
-| `src/widgets/virtual_node_dock.py` | **95%** |
-| `src/app/main_window.py` | **100%** |
-| **전체 TOTAL** | **95%** |
+- **테스트 실행 환경:** Ubuntu Linux, PySide6 시스템 패키지, `libegl1` 필요
+- **pytest 실행:** `QT_QPA_PLATFORM=offscreen PYTHONPATH=src /usr/local/bin/python -m pytest tests/ -q`
+- **uv 환경 주의:** `/root/.local/bin/pytest` 는 PySide6 없음 → 시스템 Python 사용
 
 ---
 
-## 3. 다음 작업 우선순위
+## 3. 다음 작업 우선순위 — M8 LIN H/W 지원
 
-### [우선 1] PyInstaller 최종 빌드 (Windows 환경 필요)
+### [우선 1] CANWorker LIN 모드 추가
+
+```python
+# src/core/can_worker.py
+# build_bus_kwargs()에 LIN 분기 추가
+# python-can LinBus 인터페이스 연동
+```
+
+구현 체크리스트:
+- [ ] `ChannelConfig`에 `bus_type: Literal["can", "lin"] = "can"` 필드 추가
+- [ ] `build_bus_kwargs()`에 LIN 인터페이스 분기 (`lin` 타입 처리)
+- [ ] `CANWorker`에서 LIN 메시지 수신 시 `arb_id & 0x3F` 처리 확인
+
+### [우선 2] ChannelDialog LIN 탭
+
+```
+ChannelDialog
+├── 탭: CAN (기존)
+└── 탭: LIN (신규)
+    ├── 인터페이스 선택 (Vector LIN / PLIN)
+    ├── Baud rate 선택 (9600 / 19200 / 38400)
+    └── LDF 파일 경로 입력
+```
+
+### [우선 3] 단위 테스트
+
+- [ ] `tests/test_lin_worker.py` — LinBus mock, 수신 루프
+- [ ] `tests/test_channel_dialog_lin.py` — LIN 탭 UI
+- 목표: 테스트 680개+, 커버리지 95% 유지
+
+### [우선 4] PyInstaller 최종 빌드 (Windows 환경 필요)
 
 ```bash
 python -m PyInstaller build.spec --distpath dist --workpath build --noconfirm
-```
-
-`build.spec` hiddenimport — M7은 importlib 동적 로드 방식이므로 추가 항목 없음:
-```python
-hiddenimports=[
-    'can.interfaces.vector',
-    'can.interfaces.virtual',
-    'can.interfaces.kvaser',
-    'can.interfaces.socketcan',
-    'can.interfaces.pcan',
-    'lark',
-    'lark.grammars',
-]
 ```
 
 검증 체크리스트:
@@ -105,9 +91,10 @@ hiddenimports=[
 
 | 항목 | 우선도 |
 |:---|:---:|
+| LIN H/W 버스 지원 (M8) — CANWorker LinBus + ChannelDialog LIN 탭 | 🔴 높음 |
 | PyInstaller 최종 빌드 (Windows 검증) | 🔴 높음 |
-| VirtualNodeWorker on_message arb_id 필터링 | ⚪ 낮음 (향후 확장) |
-| Virtual Node 스크립트 핫리로드 | ⚪ 낮음 |
+| VirtualNodeWorker on_message arb_id 필터링 | ⚪ 낮음 (M8 묶음) |
+| Virtual Node 스크립트 핫리로드 | ⚪ 낮음 (M8 묶음) |
 
 ---
 
@@ -152,6 +139,8 @@ hiddenimports=[
 34. VNE 스크립트  : importlib.util.spec_from_file_location 동적 로드. hiddenimport 불필요
 35. VNE shutdown  : closeEvent에서 반드시 vne.unload_all() 호출 (CANWorker.stop() 이후, LogWorker.stop() 이전)
 36. VNE 예외 격리 : on_message/on_timer 예외 → node_error Signal emit, 노드 중단 없음
+37. LIN bus_type  : ChannelConfig.bus_type = "lin" 시 build_bus_kwargs() LIN 분기 실행 (M8 추가 예정)
+38. pytest 환경   : uv 환경 pytest 사용 금지 → /usr/local/bin/python -m pytest 사용 (Linux CI)
 ```
 
 ---
@@ -209,14 +198,14 @@ PyCANoe/
 ```bash
 cd PyCANoe
 
-# 전체 테스트
-QT_QPA_PLATFORM=offscreen PYTHONPATH=src pytest tests/ -v
+# 전체 테스트 (Linux — 시스템 Python 사용)
+QT_QPA_PLATFORM=offscreen PYTHONPATH=src /usr/local/bin/python -m pytest tests/ -v
 
 # 커버리지
-QT_QPA_PLATFORM=offscreen PYTHONPATH=src pytest tests/ --cov=src --cov-report=term-missing
+QT_QPA_PLATFORM=offscreen PYTHONPATH=src /usr/local/bin/python -m pytest tests/ --cov=src --cov-report=term-missing
 
 # M7만
-QT_QPA_PLATFORM=offscreen PYTHONPATH=src pytest tests/test_virtual_node_engine.py -v
+QT_QPA_PLATFORM=offscreen PYTHONPATH=src /usr/local/bin/python -m pytest tests/test_virtual_node_engine.py -v
 
 # 앱 직접 실행
 python src/main.py
@@ -234,4 +223,5 @@ python src/main.py
 | 8차 | 커버리지 향상 | 373 | 82% |
 | 9차 | 다중 인터페이스 지원 | 443 | 84% |
 | 10차 | 커버리지 84%→95%, 테스트 137개 추가 | 580 | 95% |
-| **11차** | **M7 Virtual Node Engine 완료** | **630** | **95%** |
+| 11차 | M7 Virtual Node Engine 완료 | 630 | 95% |
+| **12차** | **Phase 0: git 정리 & 문서 최신화, M8 계획 수립** | **630** | **95%** |
