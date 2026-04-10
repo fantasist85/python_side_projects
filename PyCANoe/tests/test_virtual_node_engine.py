@@ -379,7 +379,7 @@ class TestVirtualNodeEngine:
         path = self._script()
         nid = vne.load_script(0, path)
 
-        worker, _ = vne._nodes[nid]
+        worker = vne._nodes[nid].worker
         original_enqueue = worker.enqueue_message
         called = []
         worker.enqueue_message = lambda m: called.append(m)
@@ -397,7 +397,7 @@ class TestVirtualNodeEngine:
         path = self._script()
         nid = vne.load_script(0, path)
 
-        worker, _ = vne._nodes[nid]
+        worker = vne._nodes[nid].worker
         called = []
         worker.enqueue_message = lambda m: called.append(m)
 

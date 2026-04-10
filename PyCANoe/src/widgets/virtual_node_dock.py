@@ -1,11 +1,13 @@
 # widgets/virtual_node_dock.py
 """
 VirtualNodeDock — M7 Virtual Node Engine UI.
+M9 업데이트: 핫리로드 체크박스 추가.
 
 [UI 구조]
   QSplitter(Vertical)
   ├── 상단: 노드 관리 패널
   │     ├── [스크립트 로드] [채널 선택] [노드 시작] [노드 정지] [전체 정지]
+  │     ├── [🔄 핫리로드] 체크박스 (선택된 노드에 핫리로드 토글) ← M9 신규
   │     └── 노드 목록 QTreeWidget (NodeID / Script / CH / 상태)
   └── 하단: 로그 콘솔
         ├── 로그 출력 QTextEdit (read-only, 타임스탬프 + 노드ID)
@@ -24,6 +26,7 @@ from typing import TYPE_CHECKING
 from PySide6.QtCore import Qt, Signal, Slot
 from PySide6.QtGui import QColor, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QHBoxLayout,
@@ -102,6 +105,15 @@ class VirtualNodeDock(QWidget):
         self._btn_stop_all = QPushButton("■ 전체 정지")
         ctrl_layout.addWidget(self._btn_stop_all)
 
+        # M9: 핫리로드 체크박스
+        self._chk_hot_reload = QCheckBox("🔄 핫리로드")
+        self._chk_hot_reload.setToolTip(
+            "선택된 노드의 스크립트 파일 변경 시 자동으로 재로드합니다.\n"
+            "파일 저장 후 약 500ms 내에 적용됩니다."
+        )
+        self._chk_hot_reload.setEnabled(False)
+        ctrl_layout.addWidget(self._chk_hot_reload)
+
         ctrl_layout.addStretch()
 
         # 노드 목록
@@ -146,12 +158,14 @@ class VirtualNodeDock(QWidget):
         self._btn_stop_selected.clicked.connect(self._on_stop_selected_clicked)
         self._btn_stop_all.clicked.connect(self._on_stop_all_clicked)
         self._btn_clear_log.clicked.connect(self._log_edit.clear)
+        self._chk_hot_reload.toggled.connect(self._on_hot_reload_toggled)
 
     def _connect_signals(self) -> None:
         self._vne.log_emitted.connect(self._on_log_emitted)
         self._vne.node_error.connect(self._on_node_error)
         self._vne.node_started.connect(self._on_node_started)
         self._vne.node_stopped.connect(self._on_node_stopped)
+        self._vne.node_reloaded.connect(self._on_node_reloaded)   # M9
 
     # ------------------------------------------------------------------
     # UI 이벤트
@@ -181,7 +195,16 @@ class VirtualNodeDock(QWidget):
         self._vne.unload_all()
 
     def _on_selection_changed(self) -> None:
-        self._btn_stop_selected.setEnabled(bool(self._tree.selectedItems()))
+        has_selection = bool(self._tree.selectedItems())
+        self._btn_stop_selected.setEnabled(has_selection)
+        self._chk_hot_reload.setEnabled(has_selection)
+
+    def _on_hot_reload_toggled(self, checked: bool) -> None:
+        """핫리로드 체크박스 토글 → 선택된 노드에 적용."""
+        for item in self._tree.selectedItems():
+            node_id = item.data(0, Qt.ItemDataRole.UserRole)
+            if node_id is not None:
+                self._vne.set_hot_reload(node_id, checked)
 
     # ------------------------------------------------------------------
     # VirtualNodeEngine Signal 슬롯
@@ -224,6 +247,21 @@ class VirtualNodeDock(QWidget):
             if idx >= 0:
                 self._tree.takeTopLevelItem(idx)
         self._append_log(node_id, "[정지]")
+        # 핫리로드 체크박스 상태 초기화
+        if not self._tree.selectedItems():
+            self._chk_hot_reload.setEnabled(False)
+            self._chk_hot_reload.setChecked(False)
+
+    @Slot(int, str)
+    def _on_node_reloaded(self, node_id: int, script_path: str) -> None:
+        """M9: 핫리로드 완료 시 상태 업데이트."""
+        import os
+        item = self._items.get(node_id)
+        if item:
+            item.setText(1, os.path.basename(script_path))
+            item.setText(3, "▶ 실행 중")
+            item.setForeground(3, QColor("#4CAF50"))
+        self._append_log(node_id, f"[🔄 핫리로드] {os.path.basename(script_path)}")
 
     # ------------------------------------------------------------------
     # 로그 출력 (색상 구분)

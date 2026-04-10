@@ -1,6 +1,7 @@
 # core/virtual_node_engine.py
 """
 M7 Virtual Node Engine — CAPL 대체 Python 스크립트 실행 엔진.
+M9 업데이트: arb_id 필터링 + 스크립트 핫리로드 지원.
 
 [아키텍처 위치]
   Service Layer — Main Thread가 로드/언로드 제어,
@@ -11,7 +12,7 @@ M7 Virtual Node Engine — CAPL 대체 Python 스크립트 실행 엔진.
       ...
 
   def on_message(bus, msg):   # 선택. ParsedMessage 수신 시마다 호출.
-      ...
+      ...                     # 필터 설정 시 해당 arb_id 메시지만 전달됨.
 
   def on_timer(bus):          # 선택. interval_ms 주기로 반복 호출.
       ...
@@ -23,24 +24,37 @@ M7 Virtual Node Engine — CAPL 대체 Python 스크립트 실행 엔진.
   bus.get_signal(ch_id, sig_name)     → float | None (SimStateStore 조회)
   bus.set_interval(interval_ms)       → on_timer 주기 변경 (런타임 가능)
 
+  [M9 신규 — arb_id 필터]
+  bus.add_filter(arb_id)              → 특정 arb_id만 on_message()에 전달
+  bus.remove_filter(arb_id)           → 필터 제거
+  bus.clear_filters()                 → 전체 필터 제거 (모든 메시지 수신)
+
+[핫리로드 — M9 신규]
+  VirtualNodeEngine.set_hot_reload(node_id, True) 호출 시
+  500ms 폴링으로 스크립트 파일 수정 시간 감지 → 변경 시 자동 재로드.
+  재로드 시 node_id 유지, on_start()부터 재실행.
+
 [스레드 안전 규칙]
   STRICT RULES:
   - on_message / on_timer 는 VirtualNodeWorker 스레드에서 실행됨.
   - bus.send()는 내부에서 Qt Signal(QueuedConnection)을 emit → Main Thread에서 CANWorker.send() 호출.
   - UI 위젯 직접 접근 절대 금지 (bus.log()도 Signal emit).
   - 스크립트 예외는 catch → log_emitted Signal로 보고, 노드 중단하지 않음.
+  - 핫리로드 타이머: QTimer(Main Thread), 500ms 폴링.
 """
 from __future__ import annotations
 
 import importlib.util
 import logging
+import os
 import time
 import types
+from dataclasses import dataclass, field
 from threading import Lock
 from typing import TYPE_CHECKING
 
 import can
-from PySide6.QtCore import QObject, QThread, Signal, Slot
+from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot
 
 from models.parsed_message import ParsedMessage
 
@@ -49,6 +63,23 @@ if TYPE_CHECKING:
     from models.sim_state_store import SimStateStore
 
 logger = logging.getLogger(__name__)
+
+_HOT_RELOAD_INTERVAL_MS = 500   # 핫리로드 폴링 주기 (ms)
+
+
+# ---------------------------------------------------------------------------
+# _NodeInfo — 노드별 메타데이터
+# ---------------------------------------------------------------------------
+
+@dataclass
+class _NodeInfo:
+    """노드 한 개의 런타임 상태. Main Thread 전용."""
+    worker:      "VirtualNodeWorker"
+    bus:         "BusProxy"
+    ch_id:       int
+    script_path: str
+    last_mtime:  float = 0.0        # 핫리로드용 파일 수정 시간 캐시
+    hot_reload:  bool  = False      # 핫리로드 활성 여부
 
 
 # ---------------------------------------------------------------------------
@@ -79,6 +110,10 @@ class BusProxy(QObject):
         self._interval_ms: float = 100.0
         self._interval_lock = Lock()
 
+        # M9: arb_id 필터. 빈 set = 필터 없음 (전체 전달)
+        self._arb_id_filters: set[int] = set()
+        self._filter_lock = Lock()
+
     # ------------------------------------------------------------------
     # 스크립트 공개 API
     # ------------------------------------------------------------------
@@ -104,9 +139,41 @@ class BusProxy(QObject):
         with self._interval_lock:
             self._interval_ms = max(1.0, float(interval_ms))
 
+    # ── M9: arb_id 필터 API ───────────────────────────────────────────
+
+    def add_filter(self, arb_id: int) -> None:
+        """
+        특정 arb_id만 on_message()에 전달받도록 필터 추가.
+        필터가 1개라도 있으면 등록된 arb_id 메시지만 전달됨.
+        Thread-safe.
+        """
+        with self._filter_lock:
+            self._arb_id_filters.add(int(arb_id))
+
+    def remove_filter(self, arb_id: int) -> None:
+        """arb_id 필터 제거. Thread-safe."""
+        with self._filter_lock:
+            self._arb_id_filters.discard(int(arb_id))
+
+    def clear_filters(self) -> None:
+        """모든 필터 제거 → 이후 전체 메시지 수신. Thread-safe."""
+        with self._filter_lock:
+            self._arb_id_filters.clear()
+
     # ------------------------------------------------------------------
     # 내부 접근자 (VirtualNodeWorker에서 사용)
     # ------------------------------------------------------------------
+
+    def should_deliver(self, arb_id: int) -> bool:
+        """
+        필터 체크. 필터 없으면 True(전체 전달).
+        필터 있으면 arb_id가 등록된 경우만 True.
+        Thread-safe.
+        """
+        with self._filter_lock:
+            if not self._arb_id_filters:
+                return True
+            return arb_id in self._arb_id_filters
 
     @property
     def interval_ms(self) -> float:
@@ -178,7 +245,9 @@ class VirtualNodeWorker(QThread):
                 self._msg_queue = []
 
             for msg in pending:
-                self._call("on_message", self._bus, msg)
+                # M9: arb_id 필터 적용
+                if self._bus.should_deliver(msg.arb_id):
+                    self._call("on_message", self._bus, msg)
 
             # ── on_timer 처리 ────────────────────────────────────────
             now = time.perf_counter()
@@ -213,7 +282,7 @@ class VirtualNodeWorker(QThread):
 
 class VirtualNodeEngine(QObject):
     """
-    THREAD  : Main Thread 전용. 로드/언로드/라우팅.
+    THREAD  : Main Thread 전용. 로드/언로드/라우팅/핫리로드.
     INPUT   : ParsedMessage (Dispatcher → on_all_messages Slot)
     OUTPUT  : BusProxy.send_requested → CANWorker.send()
               BusProxy.log_emitted    → log_emitted Signal
@@ -227,10 +296,11 @@ class VirtualNodeEngine(QObject):
         dispatcher.message_routed.connect(self._vne.on_all_messages)
     """
 
-    log_emitted  = Signal(int, str)    # (node_id, text) → VirtualNodeDock
-    node_error   = Signal(int, str)    # (node_id, error_msg)
-    node_started = Signal(int, str)    # (node_id, script_path)
-    node_stopped = Signal(int)         # node_id
+    log_emitted    = Signal(int, str)    # (node_id, text) → VirtualNodeDock
+    node_error     = Signal(int, str)    # (node_id, error_msg)
+    node_started   = Signal(int, str)    # (node_id, script_path)
+    node_stopped   = Signal(int)         # node_id
+    node_reloaded  = Signal(int, str)    # (node_id, script_path) ← M9 신규
 
     def __init__(
         self,
@@ -241,9 +311,14 @@ class VirtualNodeEngine(QObject):
         super().__init__(parent)
         self._channel_manager = channel_manager
         self._sim_state       = sim_state
-        # node_id → (VirtualNodeWorker, BusProxy)
-        self._nodes: dict[int, tuple[VirtualNodeWorker, BusProxy]] = {}
+        self._nodes: dict[int, _NodeInfo] = {}
         self._next_id = 0
+
+        # M9: 핫리로드 폴링 타이머
+        self._hot_reload_timer = QTimer(self)
+        self._hot_reload_timer.setInterval(_HOT_RELOAD_INTERVAL_MS)
+        self._hot_reload_timer.timeout.connect(self._check_hot_reload)
+        self._hot_reload_timer.start()
 
     # ------------------------------------------------------------------
     # 노드 로드 / 언로드
@@ -252,7 +327,7 @@ class VirtualNodeEngine(QObject):
     def load_script(self, ch_id: int, script_path: str) -> int:
         """
         스크립트 파일을 로드하여 새 Virtual Node를 시작한다.
-        반환값: node_id (언로드 시 사용)
+        반환값: node_id (언로드/핫리로드 시 사용)
         Main Thread 전용.
         """
         module = self._load_module(script_path)
@@ -274,7 +349,18 @@ class VirtualNodeEngine(QObject):
         )
         worker.start()
 
-        self._nodes[node_id] = (worker, bus)
+        try:
+            mtime = os.path.getmtime(script_path)
+        except OSError:
+            mtime = 0.0
+
+        self._nodes[node_id] = _NodeInfo(
+            worker=worker,
+            bus=bus,
+            ch_id=ch_id,
+            script_path=script_path,
+            last_mtime=mtime,
+        )
         self.node_started.emit(node_id, script_path)
         logger.info("VirtualNode %d 시작: CH%d — %s", node_id, ch_id, script_path)
         return node_id
@@ -284,11 +370,10 @@ class VirtualNodeEngine(QObject):
         실행 중인 Virtual Node를 정지하고 제거한다.
         Main Thread 전용.
         """
-        pair = self._nodes.pop(node_id, None)
-        if pair is None:
+        info = self._nodes.pop(node_id, None)
+        if info is None:
             return
-        worker, _ = pair
-        worker.stop()
+        info.worker.stop()
         self.node_stopped.emit(node_id)
         logger.info("VirtualNode %d 정지", node_id)
 
@@ -300,9 +385,80 @@ class VirtualNodeEngine(QObject):
     def active_nodes(self) -> list[tuple[int, int]]:
         """[(node_id, ch_id), ...] 목록 반환."""
         return [
-            (nid, bus.ch_id)
-            for nid, (_, bus) in self._nodes.items()
+            (nid, info.ch_id)
+            for nid, info in self._nodes.items()
         ]
+
+    # ------------------------------------------------------------------
+    # M9: 핫리로드 제어
+    # ------------------------------------------------------------------
+
+    def set_hot_reload(self, node_id: int, enabled: bool) -> None:
+        """
+        특정 노드의 핫리로드 활성화/비활성화.
+        활성화 시 500ms 폴링으로 파일 수정 시간 감지 → 자동 재로드.
+        Main Thread 전용.
+        """
+        info = self._nodes.get(node_id)
+        if info is None:
+            return
+        info.hot_reload = enabled
+        if enabled:
+            # 기준 mtime 갱신 (즉각 reload 방지)
+            try:
+                info.last_mtime = os.path.getmtime(info.script_path)
+            except OSError:
+                pass
+        logger.info("VirtualNode %d 핫리로드: %s", node_id, "ON" if enabled else "OFF")
+
+    @Slot()
+    def _check_hot_reload(self) -> None:
+        """
+        QTimer(500ms) 슬롯 — Main Thread에서 실행.
+        핫리로드 활성 노드의 파일 수정 시간을 확인하여 변경 시 재로드.
+        """
+        for node_id, info in list(self._nodes.items()):
+            if not info.hot_reload:
+                continue
+            try:
+                mtime = os.path.getmtime(info.script_path)
+            except OSError:
+                continue
+            if mtime > info.last_mtime:
+                info.last_mtime = mtime
+                self._reload_node(node_id)
+
+    def _reload_node(self, node_id: int) -> None:
+        """
+        노드를 재로드한다 (node_id 유지).
+        기존 Worker stop → 새 모듈 로드 → 새 Worker start.
+        Main Thread 전용.
+        """
+        info = self._nodes.get(node_id)
+        if info is None:
+            return
+
+        logger.info("VirtualNode %d 핫리로드: %s", node_id, info.script_path)
+
+        # 기존 Worker 정지
+        info.worker.stop()
+
+        # 새 모듈 로드
+        module = self._load_module(info.script_path)
+        if module is None:
+            self.node_error.emit(node_id, f"[핫리로드 실패] {info.script_path}")
+            return
+
+        # BusProxy 재사용 (ch_id, sim_state, filters 유지)
+        new_worker = VirtualNodeWorker(module, info.bus)
+        new_worker.node_error.connect(
+            lambda msg, nid=node_id: self.node_error.emit(nid, msg)
+        )
+        new_worker.start()
+
+        info.worker = new_worker
+        self.node_reloaded.emit(node_id, info.script_path)
+        logger.info("VirtualNode %d 재로드 완료", node_id)
 
     # ------------------------------------------------------------------
     # 메시지 라우팅 슬롯 (Dispatcher에서 연결)
@@ -317,8 +473,8 @@ class VirtualNodeEngine(QObject):
         """
         if msg.is_tx:
             return
-        for worker, _ in self._nodes.values():
-            worker.enqueue_message(msg)
+        for info in self._nodes.values():
+            info.worker.enqueue_message(msg)
 
     # ------------------------------------------------------------------
     # 전송 요청 슬롯 (BusProxy.send_requested → Main Thread)
