@@ -2,8 +2,8 @@
 
 > **기준 브랜치:** `PyCANoe`
 > **명세서 버전:** Rev 9.0
-> **기록 갱신일:** 2026-04-10 (12차 세션 — Phase 0 git 정리 & 문서 최신화)
-> **현재 상태:** M1~M7 전체 완료. 테스트 630개 / 커버리지 95%
+> **기록 갱신일:** 2026-04-10 (13차 세션 — M8 LIN H/W 지원 완료)
+> **현재 상태:** M1~M8 전체 완료. 테스트 704개 / 커버리지 95%
 
 ---
 
@@ -18,22 +18,55 @@
 | M5 | Simulation (IG) | ✅ **완료** | tx_echo, _messages_lock, drift 보정 |
 | M6 | 통합, 안정화, 최종 배포 | ✅ **완료** | 373/373 통과, 커버리지 82% |
 | M7 | Virtual Node Engine | ✅ **완료** | 630/630 통과, 커버리지 95% (11차) |
-| **M8** | **LIN H/W 버스 지원** | 🔲 **계획** | **python-can LinBus + ChannelDialog LIN 탭** |
+| **M8** | **LIN H/W 버스 지원** | ✅ **완료** | **704/704 통과, 커버리지 95% (13차)** |
 
 ---
 
-## 2. 이번 세션(12차) 작업 내역 — Phase 0 git 정리
+## 2. 이번 세션(13차) 작업 내역 — M8 LIN H/W 지원
 
-### 2-1. 작업 내용
+### 2-1. 신규 / 수정 파일
 
-| 항목 | 내용 |
+| 파일 | 역할 |
 |:---|:---|
-| 테스트 검증 | 630/630 패스 확인 (커버리지 95% 유지) |
-| 문서 최신화 | PyCANoe_DevStatus.md Rev 12차 갱신 |
-| 문서 최신화 | PyCANoe.md M8 마일스톤 스코프 추가 |
-| git 커밋 | M1~M7 전체 코드 커밋 & 푸시 완료 |
+| `src/core/channel_manager.py` | `ChannelConfig`에 `bus_type`, `lin_baud` 필드 추가 |
+| `src/core/can_worker.py` | `build_bus_kwargs()` LIN 분기, `_build_lin_bus_kwargs()` 추가, `_connect_and_listen()` LIN HW 필터 스킵 |
+| `src/app/dialogs/channel_dialog.py` | 버스 유형 선택 (CAN/LIN), LIN 전용 패널 추가, FD·HW필터 LIN 시 숨김 |
+| `src/app/config_manager.py` | `bus_type`/`lin_baud` 저장·복원, SETTINGS_VERSION 2, v1→v2 마이그레이션 |
+| `tests/test_lin_bus_kwargs.py` | M8 bus_kwargs 단위 테스트 32개 |
+| `tests/test_channel_dialog_lin.py` | M8 다이얼로그 LIN 탭 테스트 30개 |
+| `tests/test_config_manager_lin.py` | M8 ConfigManager 저장/복원 테스트 12개 |
 
-### 2-2. 환경 메모
+### 2-2. M8 아키텍처 설계 요약
+
+```
+ChannelConfig.bus_type = "can" | "lin"
+            │
+            ▼ build_bus_kwargs()
+  "can" → 기존 CAN 분기 (virtual/vector/kvaser/socketcan/pcan)
+  "lin" → _build_lin_bus_kwargs()
+              ├─ "virtual_lin" → can.Bus(interface="virtual", ...)
+              └─ "vector_lin"  → can.Bus(interface="vector", bitrate=lin_baud, ...)
+
+ChannelDialog
+  ├─ 버스 유형: [CAN] [LIN]
+  ├─ CAN 패널 (기존): 인터페이스 스택 + FD + HW 필터
+  └─ LIN 패널 (신규): 인터페이스(virtual_lin/vector_lin) + baud(9600/19200/38400)
+
+ConfigManager SETTINGS_VERSION: 1 → 2
+  v1→v2 마이그레이션: 기존 채널 유지, bus_type/lin_baud 기본값 자동 적용
+```
+
+### 2-3. 커버리지 결과 (13차)
+
+| 파일 | 커버리지 |
+|:---|:---:|
+| `src/core/can_worker.py` | **100%** |
+| `src/core/channel_manager.py` | **100%** |
+| `src/app/dialogs/channel_dialog.py` | **95%** |
+| `src/app/config_manager.py` | **100%** |
+| **전체 TOTAL** | **95%** |
+
+### 2-4. 환경 메모
 
 - **테스트 실행 환경:** Ubuntu Linux, PySide6 시스템 패키지, `libegl1` 필요
 - **pytest 실행:** `QT_QPA_PLATFORM=offscreen PYTHONPATH=src /usr/local/bin/python -m pytest tests/ -q`
@@ -41,39 +74,9 @@
 
 ---
 
-## 3. 다음 작업 우선순위 — M8 LIN H/W 지원
+## 3. 다음 작업 우선순위
 
-### [우선 1] CANWorker LIN 모드 추가
-
-```python
-# src/core/can_worker.py
-# build_bus_kwargs()에 LIN 분기 추가
-# python-can LinBus 인터페이스 연동
-```
-
-구현 체크리스트:
-- [ ] `ChannelConfig`에 `bus_type: Literal["can", "lin"] = "can"` 필드 추가
-- [ ] `build_bus_kwargs()`에 LIN 인터페이스 분기 (`lin` 타입 처리)
-- [ ] `CANWorker`에서 LIN 메시지 수신 시 `arb_id & 0x3F` 처리 확인
-
-### [우선 2] ChannelDialog LIN 탭
-
-```
-ChannelDialog
-├── 탭: CAN (기존)
-└── 탭: LIN (신규)
-    ├── 인터페이스 선택 (Vector LIN / PLIN)
-    ├── Baud rate 선택 (9600 / 19200 / 38400)
-    └── LDF 파일 경로 입력
-```
-
-### [우선 3] 단위 테스트
-
-- [ ] `tests/test_lin_worker.py` — LinBus mock, 수신 루프
-- [ ] `tests/test_channel_dialog_lin.py` — LIN 탭 UI
-- 목표: 테스트 680개+, 커버리지 95% 유지
-
-### [우선 4] PyInstaller 최종 빌드 (Windows 환경 필요)
+### [우선 1] PyInstaller 최종 빌드 (Windows 환경 필요)
 
 ```bash
 python -m PyInstaller build.spec --distpath dist --workpath build --noconfirm
@@ -81,9 +84,16 @@ python -m PyInstaller build.spec --distpath dist --workpath build --noconfirm
 
 검증 체크리스트:
 - [ ] Python 없는 PC에서 `dist/PyCANoe.exe` 실행 확인
+- [ ] CAN 채널 추가 → virtual 인터페이스 동작 확인
+- [ ] LIN 채널 추가 → virtual_lin 선택, Trace 표시 확인
 - [ ] View > Virtual Node Dock → `examples/virtual_node_heartbeat.py` 로드 → Trace 확인
 - [ ] 스크립트 예외 시 로그 콘솔에 에러 출력 확인 (노드 계속 동작)
 - [ ] [전체 정지] + 앱 종료 → 스레드 정상 종료 확인 (hang 없음)
+
+### [우선 2] VN 기능 고도화 (낮은 우선도)
+
+- [ ] VirtualNodeWorker `on_message` arb_id 필터링
+- [ ] 스크립트 핫리로드 (파일 변경 감지 → 자동 재로드)
 
 ---
 
@@ -91,10 +101,9 @@ python -m PyInstaller build.spec --distpath dist --workpath build --noconfirm
 
 | 항목 | 우선도 |
 |:---|:---:|
-| LIN H/W 버스 지원 (M8) — CANWorker LinBus + ChannelDialog LIN 탭 | 🔴 높음 |
 | PyInstaller 최종 빌드 (Windows 검증) | 🔴 높음 |
-| VirtualNodeWorker on_message arb_id 필터링 | ⚪ 낮음 (M8 묶음) |
-| Virtual Node 스크립트 핫리로드 | ⚪ 낮음 (M8 묶음) |
+| VirtualNodeWorker on_message arb_id 필터링 | ⚪ 낮음 |
+| Virtual Node 스크립트 핫리로드 | ⚪ 낮음 |
 
 ---
 
@@ -139,8 +148,10 @@ python -m PyInstaller build.spec --distpath dist --workpath build --noconfirm
 34. VNE 스크립트  : importlib.util.spec_from_file_location 동적 로드. hiddenimport 불필요
 35. VNE shutdown  : closeEvent에서 반드시 vne.unload_all() 호출 (CANWorker.stop() 이후, LogWorker.stop() 이전)
 36. VNE 예외 격리 : on_message/on_timer 예외 → node_error Signal emit, 노드 중단 없음
-37. LIN bus_type  : ChannelConfig.bus_type = "lin" 시 build_bus_kwargs() LIN 분기 실행 (M8 추가 예정)
-38. pytest 환경   : uv 환경 pytest 사용 금지 → /usr/local/bin/python -m pytest 사용 (Linux CI)
+37. LIN bus_type  : ChannelConfig.bus_type = "lin" 시 build_bus_kwargs() → _build_lin_bus_kwargs() 분기
+38. LIN HW 필터  : bus_type="lin" 시 set_filters() 호출 금지 (CANWorker._connect_and_listen() 참조)
+39. ConfigManager v2: SETTINGS_VERSION=2. bus_type/lin_baud 저장 필수. v1→v2 마이그 시 clear() 금지
+40. pytest 환경   : uv 환경 pytest 사용 금지 → /usr/local/bin/python -m pytest 사용 (Linux CI)
 ```
 
 ---
@@ -158,14 +169,17 @@ PyCANoe/
 │   └── virtual_node_responder.py           ✅ 예제: DBC 신호 조건부 응답
 ├── tests/  (630/630 통과, 95% 커버리지)
 │   ├── ... (기존 580개)
-│   └── test_virtual_node_engine.py         ✅ (50) ← 11차 신규
+│   ├── test_virtual_node_engine.py         ✅ (50) ← 11차 신규
+│   ├── test_lin_bus_kwargs.py              ✅ (32) ← 13차 신규
+│   ├── test_channel_dialog_lin.py          ✅ (30) ← 13차 신규
+│   └── test_config_manager_lin.py          ✅ (12) ← 13차 신규
 └── src/
     ├── main.py
     ├── app/
     │   ├── main_window.py                  ✅ (100%) — M7 VNE 통합
     │   ├── config_manager.py               ✅
     │   └── dialogs/
-    │       ├── channel_dialog.py           ✅
+    │       ├── channel_dialog.py           ✅ (95%) ← M8 LIN 탭
     │       └── error_dialog.py             ✅
     ├── core/
     │   ├── can_worker.py                   ✅ (100%)
@@ -224,4 +238,5 @@ python src/main.py
 | 9차 | 다중 인터페이스 지원 | 443 | 84% |
 | 10차 | 커버리지 84%→95%, 테스트 137개 추가 | 580 | 95% |
 | 11차 | M7 Virtual Node Engine 완료 | 630 | 95% |
-| **12차** | **Phase 0: git 정리 & 문서 최신화, M8 계획 수립** | **630** | **95%** |
+| 12차 | Phase 0: git 정리 & 문서 최신화, M8 계획 수립 | 630 | 95% |
+| **13차** | **M8 LIN H/W 지원 완료** | **704** | **95%** |

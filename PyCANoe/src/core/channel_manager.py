@@ -9,6 +9,7 @@ class ChannelConfig:
     interface:    str
     channel:      int
     bitrate:      int
+    bus_type:     str       = "can"     # "can" | "lin"  ← M8 신규
     fd_mode:      bool      = False
     data_bitrate: int       = 2_000_000
     app_name:     str       = "PyCANoe"
@@ -29,6 +30,9 @@ class ChannelConfig:
 
     # ── Kvaser 전용 ────────────────────────────────────────────────────
     # Kvaser는 channel(int) 그대로 사용 — 추가 파라미터 없음
+
+    # ── LIN 전용 (M8) ──────────────────────────────────────────────────
+    lin_baud:     int       = 19200     # LIN baud rate: 9600 | 19200 | 38400
 
 
 @dataclass

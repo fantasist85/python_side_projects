@@ -8,9 +8,11 @@ OUTPUT  : exec() → QDialog.Accepted 시 get_config() 로 ChannelConfig 반환
 DO NOT  : Worker Thread에서 호출, blocking I/O
 
 변경 이력:
-  Rev 9.0 — 인터페이스별 전용 옵션 패널 추가
+  Rev 9.0  — 인터페이스별 전용 옵션 패널 추가
              (Vector / Kvaser / SocketCAN / PCAN / virtual)
-             인터페이스 선택 시 해당 패널만 표시, 나머지 숨김.
+  Rev 10.0 — M8: 버스 유형 선택 추가 (CAN / LIN).
+             LIN 선택 시 전용 패널 (인터페이스·baud rate) 표시.
+             FD / HW 필터 패널은 LIN 시 자동 숨김.
 """
 from __future__ import annotations
 
@@ -37,6 +39,10 @@ _INTERFACES = ["virtual", "vector", "kvaser", "socketcan", "pcan"]
 _BITRATES   = [125_000, 250_000, 500_000, 1_000_000]
 _DATA_RATES = [1_000_000, 2_000_000, 4_000_000, 8_000_000]
 
+# LIN 지원 인터페이스 / baud rate
+_LIN_INTERFACES = ["virtual_lin", "vector_lin"]
+_LIN_BAUDS      = [9600, 19200, 38400]
+
 # PCAN 표준 채널 목록 (PEAK 공식 채널 ID)
 _PCAN_CHANNELS = [
     "PCAN_USBBUS1", "PCAN_USBBUS2", "PCAN_USBBUS3", "PCAN_USBBUS4",
@@ -45,7 +51,7 @@ _PCAN_CHANNELS = [
     "PCAN_LANBUS1", "PCAN_LANBUS2",
 ]
 
-# 인터페이스 인덱스 → 스택 페이지 인덱스 매핑
+# CAN 인터페이스 인덱스 → 스택 페이지 인덱스 매핑
 _IFACE_PAGE: dict[str, int] = {
     "virtual":   0,
     "vector":    1,
@@ -59,12 +65,11 @@ class ChannelDialog(QDialog):
     """
     채널 연결 설정 다이얼로그.
 
-    인터페이스 선택에 따라 전용 옵션 패널이 동적 전환된다:
-      virtual   → 추가 옵션 없음 (채널 번호만)
-      vector    → App Name, FD 지원
-      kvaser    → 채널 번호, FD 지원
-      socketcan → 인터페이스명 (vcan0, can0 등)
-      pcan      → PCAN 채널 ID 선택
+    버스 유형 선택 (CAN / LIN):
+      CAN → 기존 인터페이스 패널 (virtual / vector / kvaser / socketcan / pcan)
+      LIN → LIN 전용 패널 (virtual_lin / vector_lin + baud rate)
+
+    인터페이스 선택에 따라 전용 옵션 패널이 동적 전환된다.
 
     사용 예:
         dlg = ChannelDialog(parent=self)
@@ -85,8 +90,8 @@ class ChannelDialog(QDialog):
         self._build_ui()
         if config is not None:
             self._load_config(config)
-        # 초기 인터페이스에 맞게 패널 갱신
-        self._on_interface_changed(self._cb_interface.currentText())
+        # 초기 버스 유형 / 인터페이스에 맞게 패널 갱신
+        self._on_bus_type_changed(self._cb_bus_type.currentText())
 
     # ------------------------------------------------------------------
     # UI 구성
@@ -95,31 +100,24 @@ class ChannelDialog(QDialog):
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
 
-        # ── 기본 설정 ─────────────────────────────────────────────────
-        basic_box = QGroupBox("기본 설정")
-        form = QFormLayout(basic_box)
+        # ── 버스 유형 (CAN / LIN) ─────────────────────────────────────
+        bus_type_box = QGroupBox("버스 유형")
+        bt_form = QFormLayout(bus_type_box)
 
-        self._cb_interface = QComboBox()
-        self._cb_interface.addItems(_INTERFACES)
-        self._cb_interface.currentTextChanged.connect(self._on_interface_changed)
-        form.addRow("인터페이스:", self._cb_interface)
+        self._cb_bus_type = QComboBox()
+        self._cb_bus_type.addItems(["CAN", "LIN"])
+        self._cb_bus_type.currentTextChanged.connect(self._on_bus_type_changed)
+        bt_form.addRow("버스 유형:", self._cb_bus_type)
 
-        self._cb_bitrate = QComboBox()
-        for br in _BITRATES:
-            self._cb_bitrate.addItem(f"{br // 1000} kbps", br)
-        self._cb_bitrate.setCurrentIndex(2)   # 500k 기본
-        form.addRow("Bitrate:", self._cb_bitrate)
+        layout.addWidget(bus_type_box)
 
-        layout.addWidget(basic_box)
+        # ── CAN 설정 패널 ─────────────────────────────────────────────
+        self._can_panel = self._make_can_panel()
+        layout.addWidget(self._can_panel)
 
-        # ── 인터페이스별 전용 옵션 (QStackedWidget) ───────────────────
-        self._stack = QStackedWidget()
-        self._stack.addWidget(self._make_page_virtual())    # 0: virtual
-        self._stack.addWidget(self._make_page_vector())     # 1: vector
-        self._stack.addWidget(self._make_page_kvaser())     # 2: kvaser
-        self._stack.addWidget(self._make_page_socketcan())  # 3: socketcan
-        self._stack.addWidget(self._make_page_pcan())       # 4: pcan
-        layout.addWidget(self._stack)
+        # ── LIN 설정 패널 (M8 신규) ────────────────────────────────────
+        self._lin_panel = self._make_lin_panel()
+        layout.addWidget(self._lin_panel)
 
         # ── CAN FD (vector / kvaser 에서만 활성) ───────────────────────
         fd_box = QGroupBox("CAN FD")
@@ -136,7 +134,7 @@ class ChannelDialog(QDialog):
 
         layout.addWidget(fd_box)
 
-        # ── HW 필터 ───────────────────────────────────────────────────
+        # ── HW 필터 (CAN 전용) ─────────────────────────────────────────
         filt_box = QGroupBox("HW ID 필터 (선택)")
         filt_box.setCheckable(True)
         filt_box.setChecked(False)
@@ -158,7 +156,82 @@ class ChannelDialog(QDialog):
         btns.rejected.connect(self.reject)
         layout.addWidget(btns)
 
-    # ── 페이지 빌더 ───────────────────────────────────────────────────
+    # ── CAN 패널 ──────────────────────────────────────────────────────
+
+    def _make_can_panel(self) -> QWidget:
+        panel = QWidget()
+        vl = QVBoxLayout(panel)
+        vl.setContentsMargins(0, 0, 0, 0)
+
+        # 기본 설정 (인터페이스 + bitrate)
+        basic_box = QGroupBox("CAN 기본 설정")
+        form = QFormLayout(basic_box)
+
+        self._cb_interface = QComboBox()
+        self._cb_interface.addItems(_INTERFACES)
+        self._cb_interface.currentTextChanged.connect(self._on_interface_changed)
+        form.addRow("인터페이스:", self._cb_interface)
+
+        self._cb_bitrate = QComboBox()
+        for br in _BITRATES:
+            self._cb_bitrate.addItem(f"{br // 1000} kbps", br)
+        self._cb_bitrate.setCurrentIndex(2)   # 500k 기본
+        form.addRow("Bitrate:", self._cb_bitrate)
+
+        vl.addWidget(basic_box)
+
+        # 인터페이스별 전용 옵션 (QStackedWidget)
+        self._stack = QStackedWidget()
+        self._stack.addWidget(self._make_page_virtual())    # 0: virtual
+        self._stack.addWidget(self._make_page_vector())     # 1: vector
+        self._stack.addWidget(self._make_page_kvaser())     # 2: kvaser
+        self._stack.addWidget(self._make_page_socketcan())  # 3: socketcan
+        self._stack.addWidget(self._make_page_pcan())       # 4: pcan
+        vl.addWidget(self._stack)
+
+        return panel
+
+    # ── LIN 패널 (M8) ─────────────────────────────────────────────────
+
+    def _make_lin_panel(self) -> QWidget:
+        panel = QWidget()
+        vl = QVBoxLayout(panel)
+        vl.setContentsMargins(0, 0, 0, 0)
+
+        lin_box = QGroupBox("LIN 설정")
+        form = QFormLayout(lin_box)
+
+        self._cb_lin_interface = QComboBox()
+        self._cb_lin_interface.addItems(_LIN_INTERFACES)
+        self._cb_lin_interface.setToolTip(
+            "virtual_lin: CI/테스트용 가상 LIN 버스\n"
+            "vector_lin:  Vector VN16xx 등 LIN H/W 채널"
+        )
+        form.addRow("인터페이스:", self._cb_lin_interface)
+
+        self._cb_lin_baud = QComboBox()
+        for baud in _LIN_BAUDS:
+            self._cb_lin_baud.addItem(f"{baud} bps", baud)
+        self._cb_lin_baud.setCurrentIndex(1)   # 19200 기본
+        form.addRow("Baud Rate:", self._cb_lin_baud)
+
+        self._spin_lin_channel = QSpinBox()
+        self._spin_lin_channel.setRange(0, 15)
+        self._spin_lin_channel.setToolTip("Vector LIN 채널 번호 (vector_lin 전용)")
+        form.addRow("채널 번호:", self._spin_lin_channel)
+
+        lbl = QLabel(
+            "<small>⚠ LIN H/W: Vector VN16xx 등 LIN 채널 지원 장치 필요.<br>"
+            "virtual_lin은 테스트·CI 환경에서 사용하세요.</small>"
+        )
+        lbl.setWordWrap(True)
+        lbl.setTextFormat(Qt.TextFormat.RichText)
+        form.addRow(lbl)
+
+        vl.addWidget(lin_box)
+        return panel
+
+    # ── CAN 인터페이스별 페이지 빌더 ──────────────────────────────────
 
     def _make_page_virtual(self) -> QWidget:
         """virtual: 채널 번호만 (fd/app_name 미지원)."""
@@ -277,11 +350,26 @@ class ChannelDialog(QDialog):
         return page
 
     # ------------------------------------------------------------------
-    # 인터페이스 전환 슬롯
+    # 버스 유형 / 인터페이스 전환 슬롯
     # ------------------------------------------------------------------
 
+    def _on_bus_type_changed(self, bus_type: str) -> None:
+        """버스 유형 선택 시 패널 전환 + FD/필터 가시성 제어."""
+        is_lin = (bus_type == "LIN")
+        self._can_panel.setVisible(not is_lin)
+        self._lin_panel.setVisible(is_lin)
+        # FD / HW 필터: LIN 미지원 → 숨김
+        self._fd_box.setVisible(not is_lin)
+        self._filt_box.setVisible(not is_lin)
+        if is_lin:
+            self._fd_box.setChecked(False)
+            self._filt_box.setChecked(False)
+        else:
+            # CAN 복귀 시 인터페이스 기반 FD 활성 여부 재적용
+            self._on_interface_changed(self._cb_interface.currentText())
+
     def _on_interface_changed(self, iface: str) -> None:
-        """인터페이스 선택 시 스택 페이지 전환 + FD 옵션 가시성 제어."""
+        """CAN 인터페이스 선택 시 스택 페이지 전환 + FD 옵션 가시성 제어."""
         page_idx = _IFACE_PAGE.get(iface, 0)
         self._stack.setCurrentIndex(page_idx)
 
@@ -300,43 +388,67 @@ class ChannelDialog(QDialog):
 
     def _load_config(self, cfg: ChannelConfig) -> None:
         """기존 ChannelConfig로 폼 초기화."""
-        idx = self._cb_interface.findText(cfg.interface)
-        if idx >= 0:
-            self._cb_interface.setCurrentIndex(idx)
+        # 버스 유형
+        bt_idx = self._cb_bus_type.findText(cfg.bus_type.upper())
+        if bt_idx >= 0:
+            self._cb_bus_type.setCurrentIndex(bt_idx)
 
-        br_idx = self._cb_bitrate.findData(cfg.bitrate)
-        if br_idx >= 0:
-            self._cb_bitrate.setCurrentIndex(br_idx)
+        if cfg.bus_type == "lin":
+            # LIN 전용 필드
+            lin_iface_idx = self._cb_lin_interface.findText(cfg.interface)
+            if lin_iface_idx >= 0:
+                self._cb_lin_interface.setCurrentIndex(lin_iface_idx)
+            baud_idx = self._cb_lin_baud.findData(cfg.lin_baud)
+            if baud_idx >= 0:
+                self._cb_lin_baud.setCurrentIndex(baud_idx)
+            self._spin_lin_channel.setValue(cfg.channel)
+        else:
+            # CAN 필드
+            idx = self._cb_interface.findText(cfg.interface)
+            if idx >= 0:
+                self._cb_interface.setCurrentIndex(idx)
 
-        # 인터페이스별 전용 필드
-        self._spin_virtual_channel.setValue(cfg.channel)
-        self._spin_vector_channel.setValue(cfg.channel)
-        self._spin_kvaser_channel.setValue(cfg.channel)
-        self._le_app_name.setText(cfg.app_name)
-        self._le_socketcan_ifname.setText(cfg.socketcan_ifname)
+            br_idx = self._cb_bitrate.findData(cfg.bitrate)
+            if br_idx >= 0:
+                self._cb_bitrate.setCurrentIndex(br_idx)
 
-        pcan_idx = self._cb_pcan_channel.findText(cfg.pcan_channel)
-        if pcan_idx >= 0:
-            self._cb_pcan_channel.setCurrentIndex(pcan_idx)
+            self._spin_virtual_channel.setValue(cfg.channel)
+            self._spin_vector_channel.setValue(cfg.channel)
+            self._spin_kvaser_channel.setValue(cfg.channel)
+            self._le_app_name.setText(cfg.app_name)
+            self._le_socketcan_ifname.setText(cfg.socketcan_ifname)
 
-        # FD
-        self._fd_box.setChecked(cfg.fd_mode)
-        dr_idx = self._cb_data_rate.findData(cfg.data_bitrate)
-        if dr_idx >= 0:
-            self._cb_data_rate.setCurrentIndex(dr_idx)
+            pcan_idx = self._cb_pcan_channel.findText(cfg.pcan_channel)
+            if pcan_idx >= 0:
+                self._cb_pcan_channel.setCurrentIndex(pcan_idx)
 
-        # HW 필터
-        if cfg.hw_id_filter is not None:
-            self._filt_box.setChecked(True)
-            self._le_filter_id.setText(f"0x{cfg.hw_id_filter:03X}")
-            if cfg.hw_id_mask is not None:
-                self._le_filter_mask.setText(f"0x{cfg.hw_id_mask:03X}")
+            self._fd_box.setChecked(cfg.fd_mode)
+            dr_idx = self._cb_data_rate.findData(cfg.data_bitrate)
+            if dr_idx >= 0:
+                self._cb_data_rate.setCurrentIndex(dr_idx)
+
+            if cfg.hw_id_filter is not None:
+                self._filt_box.setChecked(True)
+                self._le_filter_id.setText(f"0x{cfg.hw_id_filter:03X}")
+                if cfg.hw_id_mask is not None:
+                    self._le_filter_mask.setText(f"0x{cfg.hw_id_mask:03X}")
 
     def get_config(self) -> ChannelConfig:
         """Accept 시 현재 입력값으로 ChannelConfig 반환."""
+        bus_type = self._cb_bus_type.currentText().lower()  # "can" | "lin"
+
+        if bus_type == "lin":
+            return ChannelConfig(
+                interface = self._cb_lin_interface.currentText(),
+                channel   = self._spin_lin_channel.value(),
+                bitrate   = self._cb_lin_baud.currentData(),  # lin_baud와 동일
+                bus_type  = "lin",
+                lin_baud  = self._cb_lin_baud.currentData(),
+            )
+
+        # CAN
         iface = self._cb_interface.currentText()
 
-        # 채널 번호: 인터페이스별 스피너에서 읽기
         if iface == "virtual":
             channel = self._spin_virtual_channel.value()
         elif iface == "vector":
@@ -359,6 +471,7 @@ class ChannelDialog(QDialog):
             interface        = iface,
             channel          = channel,
             bitrate          = self._cb_bitrate.currentData(),
+            bus_type         = "can",
             fd_mode          = self._fd_box.isChecked() and self._fd_box.isEnabled(),
             data_bitrate     = self._cb_data_rate.currentData(),
             app_name         = self._le_app_name.text() or "PyCANoe",

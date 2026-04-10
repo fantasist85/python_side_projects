@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-SETTINGS_VERSION = 1   # 스키마 버전 — 변경 시 _migrate() 추가
+SETTINGS_VERSION = 2   # M8: bus_type, lin_baud 필드 추가
 
 
 class ConfigManager:
@@ -30,7 +30,8 @@ class ConfigManager:
 
     저장 항목 (명세서 7.4):
       settings_version, window/geometry, window/state,
-      channel/{n}/interface|channel|bitrate|fd_mode|data_bitrate|db_path,
+      channel/{n}/interface|channel|bitrate|bus_type|lin_baud|
+                  fd_mode|data_bitrate|app_name|db_path,
       log/last_path, trace/filter_id|filter_mask|auto_scroll,
       graph/rolling_window_sec
     """
@@ -58,6 +59,8 @@ class ConfigManager:
             self._qs.setValue(f"{prefix}/interface",    cfg.interface)
             self._qs.setValue(f"{prefix}/channel",      cfg.channel)
             self._qs.setValue(f"{prefix}/bitrate",      cfg.bitrate)
+            self._qs.setValue(f"{prefix}/bus_type",     cfg.bus_type)   # M8
+            self._qs.setValue(f"{prefix}/lin_baud",     cfg.lin_baud)   # M8
             self._qs.setValue(f"{prefix}/fd_mode",      cfg.fd_mode)
             self._qs.setValue(f"{prefix}/data_bitrate", cfg.data_bitrate)
             self._qs.setValue(f"{prefix}/app_name",     cfg.app_name)
@@ -111,6 +114,8 @@ class ConfigManager:
                 interface    = self._qs.value(f"{prefix}/interface",    "virtual"),
                 channel      = int(self._qs.value(f"{prefix}/channel",  ch_id)),
                 bitrate      = int(self._qs.value(f"{prefix}/bitrate",  500_000)),
+                bus_type     = self._qs.value(f"{prefix}/bus_type",     "can"),    # M8
+                lin_baud     = int(self._qs.value(f"{prefix}/lin_baud", 19200)),   # M8
                 fd_mode      = self._qs.value(f"{prefix}/fd_mode",      False, type=bool),
                 data_bitrate = int(self._qs.value(f"{prefix}/data_bitrate", 2_000_000)),
                 app_name     = self._qs.value(f"{prefix}/app_name",    "PyCANoe"),
@@ -151,7 +156,11 @@ class ConfigManager:
             logger.info("ConfigManager: settings v0 → v1 마이그레이션 (초기화)")
             self._qs.clear()
             self._qs.setValue("settings_version", SETTINGS_VERSION)
+            return
 
-        # 향후 버전 추가 시:
-        # if stored <= 1:
-        #     ... v1 → v2 변환 ...
+        if stored <= 1:
+            # v1 → v2: bus_type / lin_baud 필드 추가 (기본값 적용, 초기화 불필요)
+            logger.info("ConfigManager: settings v1 → v2 마이그레이션 (bus_type/lin_baud 기본값)")
+            self._qs.setValue("settings_version", SETTINGS_VERSION)
+            # 기존 채널 데이터는 유지 — bus_type/lin_baud 없으면 restore_channels()에서
+            # 기본값 "can" / 19200 이 자동 적용됨

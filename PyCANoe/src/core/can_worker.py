@@ -17,6 +17,9 @@ RETRY_BACKOFF_SEC = [1, 2, 4, 8, 16]
 # 인터페이스별 추가 kwargs 생성 함수 — CANWorker 외부에서 단독 테스트 가능
 _IFACE_NO_FD = frozenset({"virtual", "socketcan", "pcan"})
 
+# LIN 지원 인터페이스 집합
+_LIN_IFACES = frozenset({"vector_lin", "virtual_lin"})
+
 
 def build_bus_kwargs(config: "ChannelConfig") -> dict:
     """
@@ -26,7 +29,12 @@ def build_bus_kwargs(config: "ChannelConfig") -> dict:
     INPUT   : ChannelConfig
     OUTPUT  : dict — can.Bus(**kwargs) 에 직접 전달 가능
     DO NOT  : UI 위젯 접근, 예외 발생
+
+    M8 추가: bus_type == "lin" 인 경우 _build_lin_bus_kwargs() 분기
     """
+    if config.bus_type == "lin":
+        return _build_lin_bus_kwargs(config)
+
     iface = config.interface
 
     if iface == "virtual":
@@ -77,6 +85,44 @@ def build_bus_kwargs(config: "ChannelConfig") -> dict:
         "interface": iface,
         "channel":   config.channel,
         "bitrate":   config.bitrate,
+    }
+
+
+def _build_lin_bus_kwargs(config: "ChannelConfig") -> dict:
+    """
+    LIN 버스 kwargs 생성 (M8).
+
+    지원 인터페이스:
+      vector_lin  — Vector VN16xx 등 LIN 채널. python-can vector 인터페이스 사용.
+                    bitrate 자리에 lin_baud 전달.
+      virtual_lin — 테스트/CI 용 가상 버스. python-can virtual 인터페이스 내부 활용.
+
+    LIN 공통 특성:
+      - FD 미지원 (fd 키 제외)
+      - 필터 없음 (set_filters() 호출 안 함 — CANWorker._connect_and_listen() 참조)
+    """
+    iface = config.interface
+
+    if iface == "virtual_lin":
+        return {
+            "interface": "virtual",
+            "channel":   str(config.channel),
+        }
+
+    if iface == "vector_lin":
+        return {
+            "interface": "vector",
+            "channel":   config.channel,
+            "bitrate":   config.lin_baud,
+            "app_name":  config.app_name,
+        }
+
+    # 알 수 없는 LIN 인터페이스 — fallback
+    logger.warning("알 수 없는 LIN 인터페이스 '%s' — 기본 kwargs 사용", iface)
+    return {
+        "interface": iface,
+        "channel":   config.channel,
+        "bitrate":   config.lin_baud,
     }
 
 
@@ -210,7 +256,11 @@ class CANWorker(QThread):
         with can.Bus(**kwargs) as bus:
             self._bus = bus
 
-            if self._config.hw_id_filter is not None:
+            # HW 필터: CAN 전용. LIN은 set_filters() 미지원 → 건너뜀
+            if (
+                self._config.bus_type == "can"
+                and self._config.hw_id_filter is not None
+            ):
                 bus.set_filters([{
                     "can_id":   self._config.hw_id_filter,
                     "can_mask": self._config.hw_id_mask or 0x7FF,
