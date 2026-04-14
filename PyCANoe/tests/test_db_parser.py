@@ -178,7 +178,8 @@ class TestDbParserLIN:
         """LIN Protected ID 0xC5 → frame_id = 0x05 (& 0x3F) で get_frame 호출."""
         mock_frame = MagicMock()
         mock_frame.name = "SomeFrame"
-        mock_frame.parse.return_value = {"Signal1": 42.0}
+        # BUG-1 fix: parse() → decode() 사용 (ldfparser 0.14+)
+        mock_frame.decode.return_value = {"Signal1": 42.0}
 
         mock_ldf = MagicMock()
         mock_ldf.get_frame.return_value = mock_frame
@@ -190,6 +191,8 @@ class TestDbParserLIN:
         assert signals == {"Signal1": 42.0}
         # frame_id = 0xC5 & 0x3F = 0x05
         mock_ldf.get_frame.assert_called_once_with(0x05)
+        # decode() 호출 확인 (parse() 사용 금지)
+        mock_frame.decode.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

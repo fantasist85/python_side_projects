@@ -366,6 +366,7 @@ class MainWindow(QMainWindow):
                 self._db_loader.db_loaded.disconnect(self._on_db_loaded)
             except RuntimeError:
                 pass
+        self._last_db_path = path   # BUG-3: 에러 메시지용 경로 보관
         parser = ctxs[0].db_parser
         self._db_loader = AsyncDbLoader(parser, path)
         self._db_loader.db_loaded.connect(self._on_db_loaded)
@@ -374,6 +375,14 @@ class MainWindow(QMainWindow):
 
     def _on_db_loaded(self, success: bool, parser) -> None:
         if success:
+            # BUG-2: 모든 채널 파서에 로드된 DB 동기화
+            for ctx in self._channel_manager.all():
+                if ctx.db_parser is not parser:
+                    ctx.db_parser._db   = parser._db
+                    ctx.db_parser._type = parser._type
+                    ctx.db_parser.clear_cache()
+                ctx.worker.update_db(ctx.db_parser)
+
             self._signal_registry.enable_all()
             self._graph_dock.enable()
             self._graph_dw.show()
@@ -382,7 +391,14 @@ class MainWindow(QMainWindow):
         else:
             self._trace_dock.set_db_loaded(False)
             self._status_label.setText("DB 로드 실패")
-            ErrorDialog.show_error("DBC/LDF 파일 로드에 실패했습니다.", parent=self)
+            # BUG-3: 파일 경로 및 원인 안내 포함
+            path_info = getattr(self, "_last_db_path", "")
+            detail = f"\n\n파일: {path_info}" if path_info else ""
+            ErrorDialog.show_error(
+                f"DBC/LDF 파일 로드에 실패했습니다.{detail}"
+                "\n\n파일 형식/내용을 확인하거나 로그를 참조하세요.",
+                parent=self,
+            )
 
     def _on_start_clicked(self) -> None:
         ctxs = self._channel_manager.all()

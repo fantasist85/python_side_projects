@@ -131,6 +131,8 @@ class DbParser:
             return None, None
 
         try:
-            return frame.parse(bytes(data)), frame.name
+            # ldfparser 0.14+ : decode(bytearray) → {signal: value}
+            # parse() is deprecated and requires converters arg (DeprecationWarning + TypeError)
+            return frame.decode(bytearray(data)), frame.name
         except Exception:
             return None, None

@@ -127,7 +127,7 @@ class SimDock(QWidget):
         # ── 우: 상세 설정 ─────────────────────────────────────────────
         right_scroll = QScrollArea()
         right_scroll.setWidgetResizable(True)
-        self._detail = _SimMessageDetail(self)
+        self._detail = _SimMessageDetail(self._cm, self)   # M10: cm 전달
         self._detail.value_changed.connect(self._on_detail_changed)
         right_scroll.setWidget(self._detail)
         splitter.addWidget(right_scroll)
@@ -152,6 +152,7 @@ class SimDock(QWidget):
             "arb_id":      0x100,
             "interval_ms": 100.0,
             "data":        b"\x00" * 8,
+            "bus_type":    "can",
             "running":     False,
         })
         self._msg_tree.addTopLevelItem(item)
@@ -231,6 +232,7 @@ class SimDock(QWidget):
             arb_id      = data.get("arb_id", 0x100),
             data        = data.get("data", b"\x00" * 8),
             interval_ms = data.get("interval_ms", 100.0),
+            bus_type    = data.get("bus_type", "can"),   # M10: LIN 지원
         )
         ctx.sim_worker.add_message(sim_msg)
 
@@ -288,11 +290,14 @@ class _SimMessageDetail(QWidget):
     """
     선택된 SimMessage의 상세 설정 폼.
     Physical / Raw Hex 전환 지원.
+    M10: LIN 채널 선택 시 'Frame ID (0x00~0x3F)' 레이블 전환 + 범위 검증.
     """
     value_changed = Signal(dict)
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, cm=None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self._cm     = cm       # ChannelManager 참조 (None 허용)
+        self._is_lin = False    # 현재 선택 채널이 LIN 여부
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -304,11 +309,13 @@ class _SimMessageDetail(QWidget):
 
         self._cb_ch = QComboBox()
         self._cb_ch.addItems([f"CH{i+1}" for i in range(4)])
+        self._cb_ch.currentIndexChanged.connect(self._on_ch_type_changed)  # M10
         form.addRow("채널:", self._cb_ch)
 
         self._le_arb_id = QLineEdit("100")
         self._le_arb_id.setPlaceholderText("hex, 예: 1A0")
-        form.addRow("Arbitration ID:", self._le_arb_id)
+        self._lbl_arb_id = QLabel("Arbitration ID:")   # M10: 동적 레이블
+        form.addRow(self._lbl_arb_id, self._le_arb_id)
 
         self._spin_interval = QDoubleSpinBox()
         self._spin_interval.setRange(1.0, 60_000.0)
@@ -357,6 +364,25 @@ class _SimMessageDetail(QWidget):
 
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # M10: 채널 타입 변경 슬롯
+    # ------------------------------------------------------------------
+
+    def _on_ch_type_changed(self, index: int) -> None:
+        """
+        채널 선택 변경 시 LIN 여부 감지 → 레이블·플레이스홀더 전환.
+        CAN  → 'Arbitration ID:'  / 플레이스홀더: 'hex, 예: 1A0'
+        LIN  → 'Frame ID (0x00~0x3F):'  / 플레이스홀더: 'hex, 예: 01'
+        """
+        ctx = self._cm.get(index) if self._cm is not None else None
+        self._is_lin = ctx is not None and getattr(ctx.config, "bus_type", "can") == "lin"
+        if self._is_lin:
+            self._lbl_arb_id.setText("Frame ID (0x00~0x3F):")
+            self._le_arb_id.setPlaceholderText("hex, 예: 01  (0~3F)")
+        else:
+            self._lbl_arb_id.setText("Arbitration ID:")
+            self._le_arb_id.setPlaceholderText("hex, 예: 1A0")
+
     def _on_mode_toggled(self, raw_checked: bool) -> None:
         self._le_raw.setVisible(raw_checked)
         self._phys_area.setVisible(not raw_checked)
@@ -368,7 +394,11 @@ class _SimMessageDetail(QWidget):
         try:
             arb_id = int(self._le_arb_id.text().strip(), 16)
         except ValueError:
-            arb_id = 0x100
+            arb_id = 0x01 if self._is_lin else 0x100
+
+        # M10: LIN Frame ID는 6-bit (0x00~0x3F) 범위 클램프
+        if self._is_lin:
+            arb_id = arb_id & 0x3F
 
         raw_hex = self._le_raw.text().replace(" ", "")
         try:
@@ -381,6 +411,7 @@ class _SimMessageDetail(QWidget):
             "arb_id":      arb_id,
             "interval_ms": self._spin_interval.value(),
             "data":        data,
+            "bus_type":    "lin" if self._is_lin else "can",  # M10
             "running":     False,
         }
 

@@ -28,6 +28,25 @@ Frames {
   }
 }
 
+Node_attributes {
+  Slave1 {
+    LIN_protocol = "2.1";
+    configured_NAD = 0x01;
+    initial_NAD = 0x01;
+    product_id = 0x0000, 0x0000, 0x00;
+    response_error = StatusByte;
+    P2_min = 150 ms;
+    ST_min = 0 ms;
+    N_As_timeout = 1000 ms;
+    N_Cr_timeout = 1000 ms;
+    configurable_frames {
+      MotorStatus;
+      MotorCmd;
+      SlaveStatus;
+    }
+  }
+}
+
 Schedule_tables {
   MainTable {
     MotorStatus delay 10 ms;

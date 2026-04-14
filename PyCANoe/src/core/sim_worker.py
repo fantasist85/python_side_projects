@@ -12,6 +12,23 @@ from models.parsed_message import ParsedMessage
 logger = logging.getLogger(__name__)
 
 
+def _calc_lin_pid(frame_id: int) -> int:
+    """
+    LIN Protected ID (PID) 계산. (LIN 2.x spec §2.3.1)
+
+    frame_id : 0~63 (6-bit). 상위 비트는 무시.
+    반환값   : 8-bit PID = frame_id | (P0 << 6) | (P1 << 7)
+
+    패리티 비트:
+      P0 = ID0 ^ ID1 ^ ID2 ^ ID4
+      P1 = ~(ID1 ^ ID3 ^ ID4 ^ ID5)
+    """
+    fid = frame_id & 0x3F
+    p0 = ((fid >> 0) ^ (fid >> 1) ^ (fid >> 2) ^ (fid >> 4)) & 1
+    p1 = (~((fid >> 1) ^ (fid >> 3) ^ (fid >> 4) ^ (fid >> 5))) & 1
+    return fid | (p0 << 6) | (p1 << 7)
+
+
 @dataclass
 class SimMessage:
     """
@@ -22,6 +39,7 @@ class SimMessage:
     arb_id:       int
     data:         bytes
     interval_ms:  float
+    bus_type:     str   = "can"   # "can" | "lin"  ← M10 신규
     next_send_at: float = field(default_factory=time.perf_counter)
 
     def is_due(self, now: float) -> bool:
@@ -40,6 +58,25 @@ class SimMessage:
             data=self.data,
             is_extended_id=False,
         )
+
+    def to_lin_message(self) -> can.Message:
+        """
+        LIN 프레임 메시지 생성.
+        arb_id(6-bit frame_id) → PID(8-bit) 계산 후 arbitration_id로 전달.
+        virtual_lin / vector_lin 모두 동일 API 사용.
+        """
+        pid = _calc_lin_pid(self.arb_id & 0x3F)
+        return can.Message(
+            arbitration_id=pid,
+            data=self.data,
+            is_extended_id=False,
+        )
+
+    def to_bus_message(self) -> can.Message:
+        """bus_type에 따라 적합한 can.Message 반환."""
+        if self.bus_type == "lin":
+            return self.to_lin_message()
+        return self.to_can_message()
 
 
 class SimWorker(QThread):
@@ -102,7 +139,7 @@ class SimWorker(QThread):
         for sm in msgs:
             if sm.is_due(now):
                 try:
-                    self._bus_sender.send(sm.to_can_message())
+                    self._bus_sender.send(sm.to_bus_message())   # M10: bus_type 분기
                     self._bus_sender.increment_tx()
                 except Exception as exc:
                     logger.warning(
