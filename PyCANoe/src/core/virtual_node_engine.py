@@ -67,6 +67,19 @@ logger = logging.getLogger(__name__)
 _HOT_RELOAD_INTERVAL_MS = 500   # 핫리로드 폴링 주기 (ms)
 
 
+def _calc_lin_pid(frame_id: int) -> int:
+    """
+    B-3: LIN Spec §2.3.1 Protected ID 계산.
+    P0 = ID0 ^ ID1 ^ ID2 ^ ID4
+    P1 = ~(ID1 ^ ID3 ^ ID4 ^ ID5) & 1
+    PID = frame_id | (P0 << 6) | (P1 << 7)
+    """
+    fid = frame_id & 0x3F
+    p0  = (fid ^ (fid >> 1) ^ (fid >> 2) ^ (fid >> 4)) & 1
+    p1  = (~((fid >> 1) ^ (fid >> 3) ^ (fid >> 4) ^ (fid >> 5))) & 1
+    return fid | (p0 << 6) | (p1 << 7)
+
+
 # ---------------------------------------------------------------------------
 # _NodeInfo — 노드별 메타데이터
 # ---------------------------------------------------------------------------
@@ -103,10 +116,12 @@ class BusProxy(QObject):
         ch_id: int,
         sim_state: "SimStateStore",
         parent: QObject | None = None,
+        bus_type: str = "can",   # B-3: LIN 채널 PID 자동 계산
     ) -> None:
         super().__init__(parent)
         self._ch_id     = ch_id
         self._sim_state = sim_state
+        self._bus_type  = bus_type   # B-3: "can" | "lin"
         self._interval_ms: float = 100.0
         self._interval_lock = Lock()
 
@@ -119,7 +134,9 @@ class BusProxy(QObject):
     # ------------------------------------------------------------------
 
     def send(self, arb_id: int, data: bytes | list | bytearray) -> None:
-        """CAN 2.0 메시지 전송 요청. Signal emit → Main Thread."""
+        """CAN/LIN 메시지 전송 요청. B-3: LIN이면 PID 자동 계산. Signal emit → Main Thread."""
+        if self._bus_type == "lin":
+            arb_id = _calc_lin_pid(arb_id & 0x3F)
         self.send_requested.emit(self._ch_id, int(arb_id), bytes(data), False)
 
     def send_fd(self, arb_id: int, data: bytes | list | bytearray) -> None:
@@ -337,7 +354,10 @@ class VirtualNodeEngine(QObject):
         node_id = self._next_id
         self._next_id += 1
 
-        bus = BusProxy(ch_id, self._sim_state)
+        # B-3: 채널 버스 타입 확인 → BusProxy에 전달
+        ctx      = self._channel_manager.get(ch_id)
+        bus_type = getattr(ctx.config, "bus_type", "can") if ctx else "can"
+        bus = BusProxy(ch_id, self._sim_state, bus_type=bus_type)
         bus.send_requested.connect(self._on_send_requested)
         bus.log_emitted.connect(
             lambda text, nid=node_id: self.log_emitted.emit(nid, text)

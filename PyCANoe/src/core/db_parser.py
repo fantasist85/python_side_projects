@@ -21,6 +21,7 @@ class DbParser:
         self._db:   Any = None
         self._type: str | None = None   # "dbc" | "ldf" | None
         self._msg_def_cache: dict[int, Any] = {}
+        self._ldf_enc_map: dict = {}    # A-2: signal_name → LinSignalEncodingType
         if path:
             self.load(path)
 
@@ -40,16 +41,18 @@ class DbParser:
                 self._type = "dbc"
             elif path.lower().endswith(".ldf"):
                 import ldfparser
-                self._db   = ldfparser.parse_ldf(path)
-                self._type = "ldf"
+                self._db          = ldfparser.parse_ldf(path)
+                self._type        = "ldf"
+                self._ldf_enc_map = self._build_ldf_enc_map()   # A-2
             else:
                 return False
             self.clear_cache()
             return True
         except Exception as exc:
             logger.warning("DbParser.load() failed: %s — %s", path, exc)
-            self._db   = None
-            self._type = None
+            self._db          = None
+            self._type        = None
+            self._ldf_enc_map = {}
             return False
 
     def clear_cache(self) -> None:
@@ -116,6 +119,17 @@ class DbParser:
         except Exception:
             return None, None
 
+    def _build_ldf_enc_map(self) -> dict:
+        """A-2: LDF signal encoding_types 맵 빌드. signal_name → LinSignalEncodingType."""
+        enc_map = {}
+        try:
+            for et in self._db.get_signal_encoding_types():
+                for sig in et._signals:
+                    enc_map[sig.name] = et
+        except Exception:
+            pass
+        return enc_map
+
     def _decode_ldf(
         self, arb_id: int, data: bytes
     ) -> tuple[dict | None, str | None]:
@@ -131,8 +145,9 @@ class DbParser:
             return None, None
 
         try:
-            # ldfparser 0.14+ : decode(bytearray) → {signal: value}
-            # parse() is deprecated and requires converters arg (DeprecationWarning + TypeError)
-            return frame.decode(bytearray(data)), frame.name
+            # ldfparser 0.14+ : decode(bytearray, encoding_types) → {signal: physical_value}
+            # A-2: encoding_types 전달로 물리값(rpm, degC 등) 반환
+            enc = self._ldf_enc_map if self._ldf_enc_map else None
+            return frame.decode(bytearray(data), encoding_types=enc), frame.name
         except Exception:
             return None, None

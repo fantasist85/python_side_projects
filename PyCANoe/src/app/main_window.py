@@ -224,6 +224,8 @@ class MainWindow(QMainWindow):
         self.addToolBar(tb)
 
         tb.addAction("+ CH 추가",     self._on_add_channel_clicked)
+        tb.addAction("- CH 제거",     self._on_remove_channel_clicked)   # A-1
+        tb.addAction("✎ CH 편집",     self._on_edit_channel_clicked)     # A-1
         tb.addAction("DBC/LDF 로드",  self._on_load_db_clicked)
         tb.addSeparator()
         tb.addAction("▶ Start",       self._on_start_clicked)
@@ -272,20 +274,22 @@ class MainWindow(QMainWindow):
         self._graph_dock.update_plots()
 
     def _flush_stats(self) -> None:
+        # C-3: 컴팩트 채널별 상태바 (버스 타입 포함)
         parts = []
         stats_list = []
         for ctx in self._channel_manager.all():
-            stats = ctx.worker.get_stats()
+            stats    = ctx.worker.get_stats()
+            bus_type = getattr(ctx.config, "bus_type", "can").upper()
             parts.append(
-                f"CH{ctx.ch_id + 1}: "
-                f"Load {stats.bus_load_pct:.1f}% | "
-                f"Rx:{stats.rx_count}/s | "
-                f"Tx:{stats.tx_count}/s | "
+                f"[CH{ctx.ch_id + 1}/{bus_type}] "
+                f"Load:{stats.bus_load_pct:.0f}% "
+                f"Rx:{stats.rx_count} "
+                f"Tx:{stats.tx_count} "
                 f"Err:{stats.error_count}"
             )
             stats_list.append((ctx.ch_id, stats))
         if parts:
-            self._status_label.setText("  ".join(parts))
+            self._status_label.setText("  |  ".join(parts))
         # Bus Statistics Dock 갱신 (표시 중인 경우에만)
         if self._bus_stats_dw.isVisible() and stats_list:
             self._bus_stats_dock.update_stats(stats_list)
@@ -313,7 +317,8 @@ class MainWindow(QMainWindow):
                 # M7: Worker → VNE 메시지 라우팅
                 ctx.worker.parsed_message_received.connect(
                     self._vne.on_all_messages, Qt.ConnectionType.QueuedConnection)
-                self._trace_dock.add_channel_tab(ch_id)   # 채널 탭 활성화
+                self._trace_dock.add_channel_tab(ch_id)          # 채널 탭 활성화
+                self._trace_model.set_ch_type(ch_id, cfg.bus_type)  # B-1
                 logger.info("CH%d 설정 복원 (%s / %dkbps)", ch_id + 1,
                             cfg.interface, cfg.bitrate // 1000)
             except Exception as exc:
@@ -349,8 +354,41 @@ class MainWindow(QMainWindow):
             )
             self._sim_dock.refresh_channels()
             self._trace_dock.add_channel_tab(ch_id)   # 채널 탭 활성화
+            self._trace_model.set_ch_type(ch_id, config.bus_type)   # B-1
         except Exception as exc:
             ErrorDialog.show_error(str(exc), parent=self)
+
+    def _on_remove_channel_clicked(self) -> None:
+        """A-1: 현재 선택된 채널 탭의 채널 제거."""
+        ch_id = self._trace_dock.get_current_ch_id()
+        if ch_id is None:
+            QMessageBox.information(self, "안내", "제거할 채널을 탭에서 선택하세요.")
+            return
+        ctx = self._channel_manager.get(ch_id)
+        if ctx is None:
+            return
+        self._channel_manager.remove_channel(ch_id)
+        self._trace_dock.remove_channel_tab(ch_id)
+        self._trace_model.remove_ch_type(ch_id)   # B-1 연동
+        self._sim_dock.refresh_channels()
+        self._status_label.setText(f"CH{ch_id + 1} 제거됨")
+
+    def _on_edit_channel_clicked(self) -> None:
+        """A-1: 현재 선택된 채널 탭의 채널 설정 편집."""
+        ch_id = self._trace_dock.get_current_ch_id()
+        if ch_id is None:
+            QMessageBox.information(self, "안내", "편집할 채널을 탭에서 선택하세요.")
+            return
+        ctx = self._channel_manager.get(ch_id)
+        if ctx is None:
+            return
+        dlg = ChannelDialog(ch_id=ch_id, config=ctx.config, parent=self)
+        if dlg.exec() != ChannelDialog.DialogCode.Accepted:
+            return
+        new_config = dlg.get_config()
+        ctx.config = new_config
+        self._trace_model.set_ch_type(ch_id, new_config.bus_type)   # B-1 갱신
+        self._status_label.setText(f"CH{ch_id + 1} 설정 편집됨")
 
     def _on_load_db_clicked(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -378,8 +416,9 @@ class MainWindow(QMainWindow):
             # BUG-2: 모든 채널 파서에 로드된 DB 동기화
             for ctx in self._channel_manager.all():
                 if ctx.db_parser is not parser:
-                    ctx.db_parser._db   = parser._db
-                    ctx.db_parser._type = parser._type
+                    ctx.db_parser._db          = parser._db
+                    ctx.db_parser._type        = parser._type
+                    ctx.db_parser._ldf_enc_map = parser._ldf_enc_map  # A-2
                     ctx.db_parser.clear_cache()
                 ctx.worker.update_db(ctx.db_parser)
 
@@ -387,6 +426,7 @@ class MainWindow(QMainWindow):
             self._graph_dock.enable()
             self._graph_dw.show()
             self._trace_dock.set_db_loaded(True)   # 우클릭 "Send to Graph" 활성화
+            self._sim_dock.set_db(parser)          # B-2: LDF 프레임 목록 갱신
             self._status_label.setText(f"DB 로드 완료 [{parser.db_type.upper()}]")
         else:
             self._trace_dock.set_db_loaded(False)
@@ -477,6 +517,7 @@ class MainWindow(QMainWindow):
     def _on_connection_state_changed(self, ch_id: int, is_connected: bool) -> None:
         state = "연결됨" if is_connected else "끊김"
         self._status_label.setText(f"CH{ch_id + 1} {state}")
+        self._trace_dock.update_channel_tab_state(ch_id, is_connected)  # C-1
 
     def _on_log_dropped(self, count: int) -> None:
         self._show_drop_warning(f"Log 드롭: {count}건")

@@ -26,7 +26,9 @@ class TraceModel(QAbstractTableModel):
         self._rows: list[ParsedMessage] = []
         self._filter_id:   int | None = None
         self._filter_mask: int        = 0x7FF
-        self._ch_filter:   int | None = None   # None=All, 0..3=채널 필터
+        self._filter_ids:  list[int]  = []      # C-2: 멀티 ID 필터 (우선 적용)
+        self._ch_filter:   int | None = None    # None=All, 0..3=채널 필터
+        self._ch_type_map: dict[int, str] = {}  # B-1: ch_id → "can"|"lin"
 
     # ------------------------------------------------------------------
     # QAbstractTableModel 필수 구현
@@ -75,8 +77,14 @@ class TraceModel(QAbstractTableModel):
         if not batch:
             return
 
-        # SW 필터 적용
-        if self._filter_id is not None:
+        # SW 필터 적용 — C-2: 멀티 ID 우선, 단일 ID 하위 호환
+        if self._filter_ids:
+            mask = self._filter_mask
+            batch = [
+                m for m in batch
+                if any((m.arb_id & mask) == (fid & mask) for fid in self._filter_ids)
+            ]
+        elif self._filter_id is not None:
             batch = [
                 m for m in batch
                 if (m.arb_id & self._filter_mask) == (self._filter_id & self._filter_mask)
@@ -120,13 +128,29 @@ class TraceModel(QAbstractTableModel):
         return None
 
     def set_filter(self, filter_id: int, filter_mask: int) -> None:
-        """SW ID 필터 설정. 이후 append_batch()에서 적용."""
+        """SW ID 필터 설정 (단일 ID). 이후 append_batch()에서 적용."""
         self._filter_id   = filter_id
         self._filter_mask = filter_mask
+        self._filter_ids  = [filter_id]   # C-2: 단일 ID도 list에 동기화
+
+    def set_multi_filter(self, ids: list[int], filter_mask: int) -> None:
+        """C-2: 멀티 ID 필터 설정. 콤마 구분 다중 ID 지원."""
+        self._filter_ids  = list(ids)
+        self._filter_mask = filter_mask
+        self._filter_id   = ids[0] if ids else None   # 하위 호환
 
     def clear_filter(self) -> None:
         """필터 초기화."""
-        self._filter_id = None
+        self._filter_id  = None
+        self._filter_ids = []   # C-2: 멀티 필터도 초기화
+
+    def set_ch_type(self, ch_id: int, bus_type: str) -> None:
+        """B-1: 채널 버스 타입 등록. bus_type = 'can' | 'lin'."""
+        self._ch_type_map[ch_id] = bus_type.lower()
+
+    def remove_ch_type(self, ch_id: int) -> None:
+        """B-1: 채널 버스 타입 제거 (채널 삭제 시)."""
+        self._ch_type_map.pop(ch_id, None)
 
     def set_ch_filter(self, ch_id: int | None) -> None:
         """
@@ -152,7 +176,8 @@ class TraceModel(QAbstractTableModel):
         if col == _COL_IDX["Type"]:
             if msg.is_error:  return "ERR"
             if msg.is_fd:     return "FD"
-            return "CAN"
+            # B-1: ch_type_map에 따라 LIN/CAN 구분
+            return "LIN" if self._ch_type_map.get(msg.ch_id) == "lin" else "CAN"
         if col == _COL_IDX["ID"]:
             return f"{msg.arb_id:X}"
         if col == _COL_IDX["DLC"]:

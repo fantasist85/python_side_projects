@@ -168,7 +168,7 @@ class TestMainWindowFlushStats:
         win._flush_stats()
         text = win._status_label.text()
         assert "CH1" in text
-        assert "12.5" in text
+        assert "12" in text   # C-3: :.0f 포맷 (소수점 없음)
 
     def test_flush_stats_multiple_channels(self, qtbot):
         """채널 2개 — 모두 status_label에 표시되어야 한다."""

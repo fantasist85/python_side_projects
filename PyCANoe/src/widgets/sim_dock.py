@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QRadioButton,
     QSplitter,
+    QStackedWidget,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -281,6 +282,10 @@ class SimDock(QWidget):
         """채널 추가/제거 후 상세 UI의 채널 목록 갱신."""
         self._detail.refresh_channels(self._cm)
 
+    def set_db(self, parser) -> None:
+        """B-2: DB 파서 갱신 (DB 로드 후 MainWindow에서 호출)."""
+        self._detail.set_db(parser)
+
 
 # ---------------------------------------------------------------------------
 # 상세 설정 위젯 (내부)
@@ -291,13 +296,15 @@ class _SimMessageDetail(QWidget):
     선택된 SimMessage의 상세 설정 폼.
     Physical / Raw Hex 전환 지원.
     M10: LIN 채널 선택 시 'Frame ID (0x00~0x3F)' 레이블 전환 + 범위 검증.
+    M11 B-2: LDF 로드 시 LIN 채널에서 프레임 목록 콤보박스로 전환.
     """
     value_changed = Signal(dict)
 
     def __init__(self, cm=None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._cm     = cm       # ChannelManager 참조 (None 허용)
-        self._is_lin = False    # 현재 선택 채널이 LIN 여부
+        self._cm         = cm       # ChannelManager 참조 (None 허용)
+        self._db_parser  = None     # B-2: DbParser 참조
+        self._is_lin     = False    # 현재 선택 채널이 LIN 여부
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -312,10 +319,18 @@ class _SimMessageDetail(QWidget):
         self._cb_ch.currentIndexChanged.connect(self._on_ch_type_changed)  # M10
         form.addRow("채널:", self._cb_ch)
 
+        self._lbl_arb_id = QLabel("Arbitration ID:")   # M10: 동적 레이블
+
+        # B-2: QStackedWidget — page 0: 텍스트 입력, page 1: LDF 프레임 콤보박스
+        self._id_stack = QStackedWidget()
         self._le_arb_id = QLineEdit("100")
         self._le_arb_id.setPlaceholderText("hex, 예: 1A0")
-        self._lbl_arb_id = QLabel("Arbitration ID:")   # M10: 동적 레이블
-        form.addRow(self._lbl_arb_id, self._le_arb_id)
+        self._id_stack.addWidget(self._le_arb_id)   # page 0
+
+        self._frame_cb = QComboBox()
+        self._id_stack.addWidget(self._frame_cb)    # page 1
+
+        form.addRow(self._lbl_arb_id, self._id_stack)
 
         self._spin_interval = QDoubleSpinBox()
         self._spin_interval.setRange(1.0, 60_000.0)
@@ -370,18 +385,45 @@ class _SimMessageDetail(QWidget):
 
     def _on_ch_type_changed(self, index: int) -> None:
         """
-        채널 선택 변경 시 LIN 여부 감지 → 레이블·플레이스홀더 전환.
-        CAN  → 'Arbitration ID:'  / 플레이스홀더: 'hex, 예: 1A0'
-        LIN  → 'Frame ID (0x00~0x3F):'  / 플레이스홀더: 'hex, 예: 01'
+        채널 선택 변경 시 LIN 여부 감지 → 레이블·스택 페이지 전환.
+        CAN  → 'Arbitration ID:'  / 텍스트 입력 (page 0)
+        LIN  → 'Frame ID (0x00~0x3F):' / LDF 있으면 콤보(page 1), 없으면 텍스트(page 0)
         """
         ctx = self._cm.get(index) if self._cm is not None else None
         self._is_lin = ctx is not None and getattr(ctx.config, "bus_type", "can") == "lin"
         if self._is_lin:
             self._lbl_arb_id.setText("Frame ID (0x00~0x3F):")
             self._le_arb_id.setPlaceholderText("hex, 예: 01  (0~3F)")
+            # B-2: LDF 로드 시 콤보박스 페이지로 전환
+            if self._db_parser and self._db_parser.db_type == "ldf":
+                self._refresh_frame_selector()
+                self._id_stack.setCurrentIndex(1)
+            else:
+                self._id_stack.setCurrentIndex(0)
         else:
             self._lbl_arb_id.setText("Arbitration ID:")
             self._le_arb_id.setPlaceholderText("hex, 예: 1A0")
+            self._id_stack.setCurrentIndex(0)
+
+    def set_db(self, parser) -> None:
+        """B-2: DB 파서 갱신 (DB 로드 후 호출). LIN+LDF이면 프레임 콤보박스 갱신."""
+        self._db_parser = parser
+        self._on_ch_type_changed(self._cb_ch.currentIndex())
+
+    def _refresh_frame_selector(self) -> None:
+        """B-2: LDF 프레임 목록으로 콤보박스 갱신."""
+        self._frame_cb.clear()
+        if self._db_parser is None or self._db_parser.db_type != "ldf":
+            return
+        try:
+            frames = list(self._db_parser._db.get_unconditional_frames())
+            for frame in sorted(frames, key=lambda f: f.frame_id):
+                self._frame_cb.addItem(
+                    f"0x{frame.frame_id:02X}  {frame.name}",
+                    userData=frame.frame_id,
+                )
+        except Exception as exc:
+            logger.debug("_refresh_frame_selector 오류: %s", exc)
 
     def _on_mode_toggled(self, raw_checked: bool) -> None:
         self._le_raw.setVisible(raw_checked)
@@ -391,14 +433,21 @@ class _SimMessageDetail(QWidget):
         self.value_changed.emit(self._collect())
 
     def _collect(self) -> dict:
-        try:
-            arb_id = int(self._le_arb_id.text().strip(), 16)
-        except ValueError:
-            arb_id = 0x01 if self._is_lin else 0x100
-
-        # M10: LIN Frame ID는 6-bit (0x00~0x3F) 범위 클램프
-        if self._is_lin:
+        # B-2: 활성 스택 페이지에서 arb_id 읽기
+        if self._id_stack.currentIndex() == 1:
+            # LDF 프레임 콤보박스에서 frame_id 읽기
+            arb_id = self._frame_cb.currentData()
+            if arb_id is None:
+                arb_id = 0x01
             arb_id = arb_id & 0x3F
+        else:
+            try:
+                arb_id = int(self._le_arb_id.text().strip(), 16)
+            except ValueError:
+                arb_id = 0x01 if self._is_lin else 0x100
+            # M10: LIN Frame ID는 6-bit (0x00~0x3F) 범위 클램프
+            if self._is_lin:
+                arb_id = arb_id & 0x3F
 
         raw_hex = self._le_raw.text().replace(" ", "")
         try:

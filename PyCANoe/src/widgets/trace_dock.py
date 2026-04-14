@@ -127,8 +127,8 @@ class TraceDock(QWidget):
         h.addWidget(QLabel("ID:"))
 
         self._le_filter_id = QLineEdit()
-        self._le_filter_id.setPlaceholderText("hex, 예: 1A0")
-        self._le_filter_id.setFixedWidth(80)
+        self._le_filter_id.setPlaceholderText("예: 1A0 또는 1A0,2B0")   # C-2
+        self._le_filter_id.setFixedWidth(110)
         self._le_filter_id.returnPressed.connect(self._on_filter_apply)
         h.addWidget(self._le_filter_id)
 
@@ -180,12 +180,27 @@ class TraceDock(QWidget):
     def add_channel_tab(self, ch_id: int) -> None:
         """
         채널 추가 시 MainWindow에서 호출.
-        해당 CH 탭을 활성화한다.
+        해당 CH 탭을 활성화한다. C-1: 초기 아이콘 ■(정지).
         """
         if 0 <= ch_id < _MAX_CH:
             self._active_chs.add(ch_id)
             self._tab_bar.setTabEnabled(ch_id + 1, True)
+            self._tab_bar.setTabText(ch_id + 1, f"CH{ch_id + 1} ■")  # C-1
             logger.debug("TraceDock: CH%d 탭 활성화", ch_id + 1)
+
+    def update_channel_tab_state(self, ch_id: int, is_connected: bool) -> None:
+        """C-1: 채널 탭 상태 아이콘 갱신. 수신 중=▶, 정지=■."""
+        if 0 <= ch_id < _MAX_CH and ch_id in self._active_chs:
+            icon = "▶" if is_connected else "■"
+            self._tab_bar.setTabText(ch_id + 1, f"CH{ch_id + 1} {icon}")
+            logger.debug("TraceDock: CH%d 탭 아이콘 → %s", ch_id + 1, icon)
+
+    def get_current_ch_id(self) -> int | None:
+        """현재 선택된 채널 탭의 ch_id 반환. All 탭이면 None."""
+        idx = self._tab_bar.currentIndex()
+        if idx == 0:
+            return None
+        return idx - 1
 
     def remove_channel_tab(self, ch_id: int) -> None:
         """
@@ -218,15 +233,37 @@ class TraceDock(QWidget):
     # ------------------------------------------------------------------
 
     def _on_filter_apply(self) -> None:
-        """필터 적용. 파싱 실패 시 무시."""
+        """C-2: 콤마 구분 멀티 ID 필터 적용. 단일 ID 하위 호환."""
+        raw_ids = self._le_filter_id.text().strip()
+        if not raw_ids:
+            return
         try:
-            filter_id   = int(self._le_filter_id.text().strip(), 16)
             filter_mask = int(self._le_filter_mask.text().strip(), 16)
         except ValueError:
+            filter_mask = 0x7FF
+
+        # C-2: 콤마 구분 파싱 (예: "1A0,2B0,300")
+        ids: list[int] = []
+        for token in raw_ids.split(","):
+            token = token.strip()
+            if not token:
+                continue
+            try:
+                ids.append(int(token, 16))
+            except ValueError:
+                pass
+
+        if not ids:
             logger.debug("TraceDock: 필터 입력값 파싱 실패 — 무시")
             return
-        self._model.set_filter(filter_id, filter_mask)
-        logger.debug("TraceDock: 필터 적용 id=0x%X mask=0x%X", filter_id, filter_mask)
+
+        if len(ids) == 1:
+            self._model.set_filter(ids[0], filter_mask)
+            logger.debug("TraceDock: 필터 적용 id=0x%X mask=0x%X", ids[0], filter_mask)
+        else:
+            self._model.set_multi_filter(ids, filter_mask)
+            logger.debug("TraceDock: 멀티 필터 적용 ids=%s mask=0x%X",
+                         [f"0x{i:X}" for i in ids], filter_mask)
 
     def _on_filter_clear(self) -> None:
         """필터 초기화."""
